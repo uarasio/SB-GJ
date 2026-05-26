@@ -7,7 +7,7 @@ Try it
 GrayJay -> Sources -> +
 And scan this QR code
 
-![qr-code (1)](https://raw.githubusercontent.com/ruiaso/spankbang-grayjay-plugin/refs/heads/main/assets/SBQR.png)
+![qr-code (1)](https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/Assets/SBQR.png)
 What's working:
 
 
