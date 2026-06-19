@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 90,
+  "version": 91,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -15,7 +15,7 @@
     "DOMParser",
     "Utilities"
   ],
-  "allowAllHttpHeaderAccess": false,
+  "allowAllHttpHeaderAccess": true,
   "allowEval": false,
   "allowUrls": [
     "spankbang.com",
@@ -33,6 +33,7 @@
   "authentication": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "loginUrl": "https://www.spankbang.com/users/login",
+    "completionUrl": "https://www.spankbang.com/users/account",
     "cookiesToFind": ["sb_session"],
     "cookiesExclOthers": false
   },
@@ -40,6 +41,14 @@
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "91": [
+      "CRITICAL DESKTOP FIX: Switched to a desktop Chrome User-Agent that matches the login browser, so Cloudflare's cf_clearance cookie stays valid (fixes 'status 403' on home and videos)",
+      "Added the full set of Sec-CH-UA-* Client Hint headers that SpankBang's Cloudflare challenge requires (critical-ch)",
+      "All requests now go through Grayjay's authenticated client so the cf_clearance + session cookies captured at login are sent on every request",
+      "LOGIN FIX: Added completionUrl (https://www.spankbang.com/users/account) so login no longer completes prematurely on the Cloudflare 'Just a moment' page - you can now actually enter your credentials",
+      "Enabled allowAllHttpHeaderAccess so custom request headers are applied correctly",
+      "NOTE: On Desktop you must log in once (the login browser solves the Cloudflare challenge). After that, home, videos and playlists load normally."
+    ],
     "90": [
       "FIX: Always use ?page=X URL format (even for page 1)",
       "Simplified pagination logic - keeps fetching until page returns 0 videos",

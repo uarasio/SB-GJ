@@ -73,10 +73,31 @@ const CONFIG = {
     }
 };
 
+// IMPORTANT: The User-Agent here MUST match config.authentication.userAgent
+// (the UA used by Grayjay's login web browser). SpankBang sits behind a
+// Cloudflare managed challenge and the cf_clearance cookie obtained during
+// login is bound to that exact User-Agent. A mismatch (e.g. an Android mobile
+// UA) makes cf_clearance invalid and every request returns HTTP 403.
+// The full Sec-CH-UA-* Client Hints below are explicitly required by
+// SpankBang's Cloudflare config (see the `critical-ch` response header).
 const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-ch-ua-platform-version": "\"15.0.0\"",
+    "sec-ch-ua-arch": "\"x86\"",
+    "sec-ch-ua-bitness": "\"64\"",
+    "sec-ch-ua-model": "\"\"",
+    "sec-ch-ua-full-version": "\"131.0.6778.86\"",
+    "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"131.0.6778.86\", \"Chromium\";v=\"131.0.6778.86\", \"Not_A Brand\";v=\"24.0.0.0\"",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
 };
 
 const REGEX_PATTERNS = {
@@ -135,11 +156,13 @@ const REGEX_PATTERNS = {
 };
 
 function getAuthHeaders() {
-    const headers = { ...API_HEADERS };
-    if (state.authCookies && state.authCookies.length > 0) {
-        headers["Cookie"] = state.authCookies;
-    }
-    return headers;
+    // Cookies (including the Cloudflare cf_clearance cookie and the SpankBang
+    // session cookies captured during login) are applied automatically by
+    // Grayjay's authenticated HTTP client when a request is made with
+    // useAuth=true. We deliberately do NOT inject a manual Cookie header here:
+    // a static Cookie header can clobber the auth client's rotating
+    // cf_clearance value and re-trigger Cloudflare's "Just a moment" challenge.
+    return { ...API_HEADERS };
 }
 
 function sleep(ms) {
@@ -168,7 +191,11 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
         enforceRateLimit();
         
         const requestHeaders = headers || getAuthHeaders();
-        const response = http.GET(url, requestHeaders, useAuth);
+        // Always use Grayjay's authenticated client (useAuth=true). Even when
+        // the user is not logged in this behaves like the unauthenticated
+        // client, but once logged in it carries the cf_clearance + session
+        // cookies needed to pass SpankBang's Cloudflare challenge.
+        const response = http.GET(url, requestHeaders, true);
         if (!response.isOk) {
             // If we get 429, add exponential backoff with multiple retries
             if (response.code === 429) {
@@ -180,7 +207,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                 
                 // Retry up to 3 times
                 if (localConfig.consecutiveErrors < 3) {
-                    const retryResponse = http.GET(url, requestHeaders, useAuth);
+                    const retryResponse = http.GET(url, requestHeaders, true);
                     if (retryResponse.isOk) {
                         localConfig.consecutiveErrors = 0; // Reset on success
                         localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8); // Slowly decrease
@@ -209,7 +236,8 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         enforceRateLimit();
         
         const requestHeaders = headers || getAuthHeaders();
-        const response = http.GET(url, requestHeaders, useAuth);
+        // Always use the authenticated client so cf_clearance is applied.
+        const response = http.GET(url, requestHeaders, true);
         
         // If we get 429, add exponential backoff and retry
         if (!response.isOk && response.code === 429) {
@@ -1733,12 +1761,19 @@ function parseVideoPage(html, url) {
                     {
                         "User-Agent": API_HEADERS["User-Agent"],
                         "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "en-US,en;q=0.9",
                         "Content-Type": "application/x-www-form-urlencoded",
                         "Referer": url,
                         "X-Requested-With": "XMLHttpRequest",
-                        "Origin": "https://spankbang.com"
+                        "Origin": "https://spankbang.com",
+                        "sec-ch-ua": API_HEADERS["sec-ch-ua"],
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": "\"Windows\"",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin"
                     },
-                    false
+                    true
                 );
 
                 if (streamResponse.isOk && streamResponse.body) {
@@ -3809,12 +3844,19 @@ function fetchCommentsFromApi(videoId) {
             {
                 "User-Agent": API_HEADERS["User-Agent"],
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Referer": `${BASE_URL}/${videoId}/video/`,
                 "X-Requested-With": "XMLHttpRequest",
-                "Origin": BASE_URL
+                "Origin": BASE_URL,
+                "sec-ch-ua": API_HEADERS["sec-ch-ua"],
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin"
             },
-            false
+            true
         );
         
         if (response.isOk && response.body) {
@@ -4061,6 +4103,14 @@ source.getCapabilities = function() {
 
 source.enable = function(conf, settings, savedStateStr) {
     config = conf ?? {};
+    
+    // Keep our request User-Agent identical to the User-Agent that Grayjay's
+    // login browser uses (config.authentication.userAgent). This is critical:
+    // SpankBang's Cloudflare cf_clearance cookie is bound to the exact UA used
+    // when the challenge was solved during login. Any mismatch => HTTP 403.
+    if (config && config.authentication && config.authentication.userAgent) {
+        API_HEADERS["User-Agent"] = config.authentication.userAgent;
+    }
     
     log("===== PLUGIN ENABLE CALLED =====");
     
