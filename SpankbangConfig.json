@@ -2,12 +2,12 @@
   "name": "SpankBang",
   "description": "SpankBang video platform plugin for Grayjay with pornstar search, recommendations, and improved creator profiles",
   "platformUrl": "https://www.spankbang.com",
-  "author": "uarasio",
+  "author": "GreyPluginDev",
   "authorUrl": "https://github.com/uarasio",
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 91,
+  "version": 92,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -33,7 +33,6 @@
   "authentication": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "loginUrl": "https://www.spankbang.com/users/login",
-    "completionUrl": "https://www.spankbang.com/users/account",
     "cookiesToFind": ["sb_session"],
     "cookiesExclOthers": false
   },
@@ -41,6 +40,11 @@
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "92": [
+      "REVERTED the completionUrl change from v91 - it broke login on the phone app and prevented the login browser from capturing Cloudflare clearance. Login flow is now back to the original working behavior.",
+      "Kept the v91 desktop fixes: desktop Chrome User-Agent matching the login browser, full Sec-CH-UA-* Client Hints, and all requests using the authenticated client so cf_clearance + session cookies are sent.",
+      "DESKTOP USAGE: open the plugin's Login screen once. Its browser solves SpankBang's Cloudflare 'Just a moment' check and stores the clearance cookie - after that home, videos and playlists load."
+    ],
     "91": [
       "CRITICAL DESKTOP FIX: Switched to a desktop Chrome User-Agent that matches the login browser, so Cloudflare's cf_clearance cookie stays valid (fixes 'status 403' on home and videos)",
       "Added the full set of Sec-CH-UA-* Client Hint headers that SpankBang's Cloudflare challenge requires (critical-ch)",
