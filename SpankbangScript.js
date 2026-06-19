@@ -73,32 +73,107 @@ const CONFIG = {
     }
 };
 
-// IMPORTANT: The User-Agent here MUST match config.authentication.userAgent
-// (the UA used by Grayjay's login web browser). SpankBang sits behind a
-// Cloudflare managed challenge and the cf_clearance cookie obtained during
-// login is bound to that exact User-Agent. A mismatch (e.g. an Android mobile
-// UA) makes cf_clearance invalid and every request returns HTTP 403.
-// The full Sec-CH-UA-* Client Hints below are explicitly required by
-// SpankBang's Cloudflare config (see the `critical-ch` response header).
-const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+// Persistent authenticated HTTP client. Keeping every request in one client
+// keeps the Cloudflare cf_clearance + SpankBang session cookies in a single
+// consistent jar so they are replayed identically on each request (important
+// for the managed challenge - a rotating/clobbered cf_clearance re-triggers it).
+let authClient = null;
+
+// Default desktop Chrome UA. Overridden in source.enable() with the EXACT UA
+// that Grayjay's login browser used (config.authentication.userAgent) so the
+// cf_clearance cookie bound to that UA stays valid.
+let ACTIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+// Client Hints (Sec-CH-UA-*) MUST stay consistent with the active User-Agent.
+// SpankBang's Cloudflare returns `critical-ch: Sec-CH-UA-*`, so if the hints do
+// not match the UA the challenge re-triggers and every request returns 403.
+// We DERIVE the hints from the UA instead of hardcoding a Chrome version.
+function buildClientHints(ua) {
+    ua = ua || "";
+    const isMobile = /Android|Mobile|iPhone|iPad/i.test(ua);
+    let platform = "Windows", platformVersion = "15.0.0";
+    if (/Android/i.test(ua)) { platform = "Android"; platformVersion = "14.0.0"; }
+    else if (/Macintosh|Mac OS X/i.test(ua)) { platform = "macOS"; platformVersion = "14.0.0"; }
+    else if (/Linux/i.test(ua) && !/Android/i.test(ua)) { platform = "Linux"; platformVersion = "6.0.0"; }
+
+    const major = (ua.match(/Chrome\/(\d+)/) || [null, "131"])[1];
+    const full = (ua.match(/Chrome\/([\d.]+)/) || [null, major + ".0.0.0"])[1];
+
+    return {
+        "sec-ch-ua": `"Google Chrome";v="${major}", "Chromium";v="${major}", "Not_A Brand";v="24"`,
+        "sec-ch-ua-mobile": isMobile ? "?1" : "?0",
+        "sec-ch-ua-platform": `"${platform}"`,
+        "sec-ch-ua-platform-version": `"${platformVersion}"`,
+        "sec-ch-ua-arch": isMobile ? "\"\"" : "\"x86\"",
+        "sec-ch-ua-bitness": isMobile ? "\"\"" : "\"64\"",
+        "sec-ch-ua-model": "\"\"",
+        "sec-ch-ua-full-version": `"${full}"`,
+        "sec-ch-ua-full-version-list": `"Google Chrome";v="${full}", "Chromium";v="${full}", "Not_A Brand";v="24.0.0.0"`
+    };
+}
+
+// Headers for top-level page (document) navigations.
+const API_HEADERS = Object.assign({
+    "User-Agent": ACTIVE_UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "sec-ch-ua-platform-version": "\"15.0.0\"",
-    "sec-ch-ua-arch": "\"x86\"",
-    "sec-ch-ua-bitness": "\"64\"",
-    "sec-ch-ua-model": "\"\"",
-    "sec-ch-ua-full-version": "\"131.0.6778.86\"",
-    "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"131.0.6778.86\", \"Chromium\";v=\"131.0.6778.86\", \"Not_A Brand\";v=\"24.0.0.0\"",
+    "Accept-Language": "en-US,en;q=0.9"
+}, buildClientHints(ACTIVE_UA), {
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1"
-};
+});
+
+// Re-apply a UA everywhere (UA + matching Client Hints). Called from source.enable.
+function applyUserAgent(ua) {
+    if (!ua) return;
+    ACTIVE_UA = ua;
+    API_HEADERS["User-Agent"] = ua;
+    const hints = buildClientHints(ua);
+    for (const k in hints) API_HEADERS[k] = hints[k];
+}
+
+// Headers for XHR / fetch (AJAX) API calls. Browsers send a DIFFERENT Sec-Fetch
+// set for fetch() than for navigations; reusing navigation values (Sec-Fetch-Mode:
+// navigate, Sec-Fetch-User: ?1, Upgrade-Insecure-Requests) on an AJAX request is a
+// Cloudflare bot signal, so we build a clean XHR header set that matches the UA.
+function getXhrHeaders(referer) {
+    const hints = buildClientHints(ACTIVE_UA);
+    const h = {
+        "User-Agent": ACTIVE_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": BASE_URL,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "sec-ch-ua": hints["sec-ch-ua"],
+        "sec-ch-ua-mobile": hints["sec-ch-ua-mobile"],
+        "sec-ch-ua-platform": hints["sec-ch-ua-platform"]
+    };
+    if (referer) h["Referer"] = referer;
+    return h;
+}
+
+// Authenticated GET/POST helpers. Use the persistent auth client when the runtime
+// exposes http.newClient (so cf_clearance is replayed from one jar); otherwise fall
+// back to the per-request authenticated client (http.GET/POST with useAuth=true).
+function authGet(url, headers) {
+    if (authClient && typeof authClient.GET === 'function') {
+        return authClient.GET(url, headers);
+    }
+    return http.GET(url, headers, true);
+}
+
+function authPost(url, body, headers) {
+    if (authClient && typeof authClient.POST === 'function') {
+        return authClient.POST(url, body, headers);
+    }
+    return http.POST(url, body, headers, true);
+}
 
 const REGEX_PATTERNS = {
     urls: {
@@ -191,11 +266,11 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
         enforceRateLimit();
         
         const requestHeaders = headers || getAuthHeaders();
-        // Always use Grayjay's authenticated client (useAuth=true). Even when
-        // the user is not logged in this behaves like the unauthenticated
-        // client, but once logged in it carries the cf_clearance + session
-        // cookies needed to pass SpankBang's Cloudflare challenge.
-        const response = http.GET(url, requestHeaders, true);
+        // Always use Grayjay's authenticated client (cf_clearance + session
+        // cookies). Even when the user is not logged in this behaves like the
+        // unauthenticated client, but once logged in it carries the cookies
+        // needed to pass SpankBang's Cloudflare challenge.
+        const response = authGet(url, requestHeaders);
         if (!response.isOk) {
             // If we get 429, add exponential backoff with multiple retries
             if (response.code === 429) {
@@ -207,7 +282,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                 
                 // Retry up to 3 times
                 if (localConfig.consecutiveErrors < 3) {
-                    const retryResponse = http.GET(url, requestHeaders, true);
+                    const retryResponse = authGet(url, requestHeaders);
                     if (retryResponse.isOk) {
                         localConfig.consecutiveErrors = 0; // Reset on success
                         localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8); // Slowly decrease
@@ -237,7 +312,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         
         const requestHeaders = headers || getAuthHeaders();
         // Always use the authenticated client so cf_clearance is applied.
-        const response = http.GET(url, requestHeaders, true);
+        const response = authGet(url, requestHeaders);
         
         // If we get 429, add exponential backoff and retry
         if (!response.isOk && response.code === 429) {
@@ -249,7 +324,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             
             // Retry up to 3 times
             if (localConfig.consecutiveErrors < 3) {
-                const retryResponse = http.GET(url, requestHeaders, useAuth);
+                const retryResponse = authGet(url, requestHeaders);
                 if (retryResponse.isOk) {
                     localConfig.consecutiveErrors = 0;
                     localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8);
@@ -1755,25 +1830,10 @@ function parseVideoPage(html, url) {
         if (streamKeyMatch) {
             const streamKey = streamKeyMatch[1];
             try {
-                const streamResponse = http.POST(
+                const streamResponse = authPost(
                     "https://spankbang.com/api/videos/stream",
                     "id=" + streamKey + "&data=0",
-                    {
-                        "User-Agent": API_HEADERS["User-Agent"],
-                        "Accept": "application/json, text/plain, */*",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "Referer": url,
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Origin": "https://spankbang.com",
-                        "sec-ch-ua": API_HEADERS["sec-ch-ua"],
-                        "sec-ch-ua-mobile": "?0",
-                        "sec-ch-ua-platform": "\"Windows\"",
-                        "Sec-Fetch-Dest": "empty",
-                        "Sec-Fetch-Mode": "cors",
-                        "Sec-Fetch-Site": "same-origin"
-                    },
-                    true
+                    getXhrHeaders(url)
                 );
 
                 if (streamResponse.isOk && streamResponse.body) {
@@ -3838,25 +3898,10 @@ function fetchCommentsFromApi(videoId) {
     
     try {
         const commentsApiUrl = `${BASE_URL}/api/video/comments`;
-        const response = http.POST(
+        const response = authPost(
             commentsApiUrl,
             `id=${videoId}&page=1`,
-            {
-                "User-Agent": API_HEADERS["User-Agent"],
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": `${BASE_URL}/${videoId}/video/`,
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": BASE_URL,
-                "sec-ch-ua": API_HEADERS["sec-ch-ua"],
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": "\"Windows\"",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin"
-            },
-            true
+            getXhrHeaders(`${BASE_URL}/${videoId}/video/`)
         );
         
         if (response.isOk && response.body) {
@@ -4108,8 +4153,22 @@ source.enable = function(conf, settings, savedStateStr) {
     // login browser uses (config.authentication.userAgent). This is critical:
     // SpankBang's Cloudflare cf_clearance cookie is bound to the exact UA used
     // when the challenge was solved during login. Any mismatch => HTTP 403.
+    // applyUserAgent() also recomputes the Sec-CH-UA-* Client Hints so they stay
+    // consistent with the UA (Cloudflare validates them via `critical-ch`).
     if (config && config.authentication && config.authentication.userAgent) {
-        API_HEADERS["User-Agent"] = config.authentication.userAgent;
+        applyUserAgent(config.authentication.userAgent);
+    }
+
+    // Create one persistent authenticated client so cf_clearance + session
+    // cookies are replayed from a single consistent cookie jar on every request.
+    if (authClient === null && typeof http !== 'undefined' && typeof http.newClient === 'function') {
+        try {
+            authClient = http.newClient(true);
+            log("enable: created persistent authenticated http client");
+        } catch (e) {
+            authClient = null;
+            log("enable: http.newClient unavailable, falling back to http.GET(useAuth): " + e);
+        }
     }
     
     log("===== PLUGIN ENABLE CALLED =====");
@@ -4175,6 +4234,7 @@ source.disable = function() {
     state.sessionCookie = "";
     state.isAuthenticated = false;
     state.authCookies = "";
+    authClient = null;
 };
 
 source.saveState = function() {

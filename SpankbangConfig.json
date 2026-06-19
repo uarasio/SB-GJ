@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 92,
+  "version": 93,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -40,6 +40,13 @@
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "93": [
+      "DESKTOP 403 HARDENING: Sec-CH-UA-* Client Hints are now DERIVED from the active User-Agent instead of being hardcoded to Chrome 131, so they always match the UA that obtained cf_clearance (a mismatch made Cloudflare's `critical-ch` re-trigger the challenge and return 403).",
+      "AJAX requests (stream + comments API) now send correct fetch/XHR Sec-Fetch headers instead of the navigation headers (Sec-Fetch-Mode: navigate, Sec-Fetch-User, Upgrade-Insecure-Requests) that browsers never send on fetch() - removing a Cloudflare bot signal.",
+      "All requests now go through ONE persistent authenticated http client (http.newClient) so the cf_clearance + session cookies are replayed from a single consistent cookie jar.",
+      "Fixed a retry that used the wrong (unauthenticated) client on 429 backoff.",
+      "NOTE: On Grayjay Desktop (especially Windows) the home/video 403 is primarily caused by Cloudflare TLS fingerprinting of the desktop runtime, which a plugin cannot change. These fixes remove every avoidable header/cookie mismatch to maximise success, but if Windows still 403s after logging in, the Linux/macOS desktop builds or the Android app remain the reliable options."
+    ],
     "92": [
       "REVERTED the completionUrl change from v91 - it broke login on the phone app and prevented the login browser from capturing Cloudflare clearance. Login flow is now back to the original working behavior.",
       "Kept the v91 desktop fixes: desktop Chrome User-Agent matching the login browser, full Sec-CH-UA-* Client Hints, and all requests using the authenticated client so cf_clearance + session cookies are sent.",
