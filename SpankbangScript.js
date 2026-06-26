@@ -1,20 +1,18 @@
-// IMPORTANT: keep this on the SAME host that `authentication.loginUrl` uses
-// (https://www.spankbang.com/users/login). The Cloudflare `cf_clearance`
-// cookie captured by Grayjay's login WebView is bound to that exact host;
-// requesting the apex `spankbang.com` would skip the cookie and re-trigger
-// the Cloudflare managed challenge => HTTP 403.
-const BASE_URL = "https://www.spankbang.com";
+// Apex host (no www.) matches the cf_clearance / __cf_bm cookies that
+// Cloudflare sets with Domain=spankbang.com, AND it matches the host most
+// users hit via Grayjay's "Open original page" button on a video, which is
+// the practical way users clear Cloudflare without logging in.
+const BASE_URL = "https://spankbang.com";
 const PLATFORM = "SpankBang";
 const PLATFORM_CLAIMTYPE = 3;
 
 const USER_URLS = {
-    PLAYLISTS: "https://www.spankbang.com/users/playlists",
-    HISTORY: "https://www.spankbang.com/users/history",
-    SUBSCRIPTIONS: "https://www.spankbang.com/users/subscriptions",
-    FAVORITES: "https://www.spankbang.com/users/favorites",
-    PROFILE: "https://www.spankbang.com/users/profile"
+    PLAYLISTS: "https://spankbang.com/users/playlists",
+    HISTORY: "https://spankbang.com/users/history",
+    SUBSCRIPTIONS: "https://spankbang.com/users/subscriptions",
+    FAVORITES: "https://spankbang.com/users/favorites",
+    PROFILE: "https://spankbang.com/users/profile"
 };
-
 var config = {};
 let localConfig = {
     pornstarShortIds: {},
@@ -44,8 +42,8 @@ const CONFIG = {
         "4k": { name: "4K", width: 3840, height: 2160 }
     },
     INTERNAL_URL_SCHEME: "spankbang://profile/",
-    EXTERNAL_URL_BASE: "https://www.spankbang.com",
-    PORNSTAR_IMG_BASE: "https://www.spankbang.com/pornstarimg/f/",
+    EXTERNAL_URL_BASE: "https://spankbang.com",
+    PORNSTAR_IMG_BASE: "https://spankbang.com/pornstarimg/f/",
     SEARCH_FILTERS: {
         DURATION: {
             ANY: "",
@@ -273,14 +271,27 @@ const REGEX_PATTERNS = {
     }
 };
 
+
 function getAuthHeaders() {
-    // Cookies (including the Cloudflare cf_clearance cookie and the SpankBang
-    // session cookies captured during login) are applied automatically by
-    // Grayjay's authenticated HTTP client when a request is made with
-    // useAuth=true. We deliberately do NOT inject a manual Cookie header here:
-    // a static Cookie header can clobber the auth client's rotating
-    // cf_clearance value and re-trigger Cloudflare's "Just a moment" challenge.
-    return { ...API_HEADERS };
+    const h = { ...API_HEADERS };
+    // On Android, Grayjay's authenticated http client jar is NOT always
+    // populated from the in-app WebView (especially when the user is not
+    // logged in but DID clear Cloudflare by opening the video page in
+    // "Open original page"). In that case http.GET(useAuth=true) sends no
+    // cookies and we get HTTP 403. As a safety net we replay whatever
+    // cookies we DID capture (cf_clearance, __cf_bm, sb_session, ...) via
+    // an explicit Cookie header.
+    //
+    // Note: this is the inverse of the v93 stance. v93 worried that a
+    // manual Cookie header would clobber a rotating cf_clearance; but if
+    // the jar is empty there is nothing to clobber, and a stale Cookie
+    // header is strictly better than no cookies at all. When Grayjay does
+    // populate the jar, both paths send the same cf_clearance value, so
+    // there is no conflict.
+    if (state && state.authCookies && state.authCookies.length > 0) {
+        h["Cookie"] = state.authCookies;
+    }
+    return h;
 }
 
 function sleep(ms) {
@@ -4011,8 +4022,12 @@ function fetchCommentsFromApi(videoId) {
 function hasValidAuthCookie(cookies) {
     if (!cookies) return false;
     
-    const validCookieNames = ['sb_session', 'session_token', 'remember_token', 'user_id', 'logged_in'];
-    
+    // cf_clearance / __cf_bm are Cloudflare's challenge-cleared markers. We
+    // accept them as "valid" cookie state because just having them is enough
+    // to pass Cloudflare on subsequent plugin requests, even without an
+    // actual SpankBang account session.
+    const validCookieNames = ['sb_session', 'session_token', 'remember_token', 'user_id', 'logged_in', 'cf_clearance', '__cf_bm'];
+
     if (typeof cookies === 'string') {
         if (cookies.length === 0) return false;
         for (const name of validCookieNames) {
@@ -4285,8 +4300,19 @@ source.enable = function(conf, settings, savedStateStr) {
         }
     }
     
-    if (typeof bridge !== 'undefined' && bridge.isLoggedIn && bridge.isLoggedIn()) {
+    // ALWAYS try to load whatever cookies the in-app WebView has captured
+    // for spankbang.com - including cf_clearance / __cf_bm from a casual
+    // "Open original page" visit on a video. Previously this was gated on
+    // bridge.isLoggedIn() which only returns true after a credentialed
+    // login, so anonymous-but-cleared sessions were ignored and every
+    // request went out without cf_clearance => HTTP 403.
+    try {
         loadAuthCookies();
+    } catch (e) {
+        log("enable: loadAuthCookies failed (non-fatal): " + e);
+    }
+
+    if (typeof bridge !== 'undefined' && bridge.isLoggedIn && bridge.isLoggedIn()) {
         state.isAuthenticated = true;
         
         if (!state.username || state.username.length === 0) {
@@ -4306,8 +4332,12 @@ source.enable = function(conf, settings, savedStateStr) {
     // /trending_videos/. Without this, the FIRST request after the plugin
     // starts often returns 403 on mobile.
     try {
-        const warm = authGet(BASE_URL + "/", API_HEADERS);
+        const warm = authGet(BASE_URL + "/", getAuthHeaders());
         log("enable: Cloudflare warm-up GET / -> " + (warm && warm.code));
+        // Re-pull cookies AFTER the warm-up so any __cf_bm Cloudflare just
+        // set is captured into state.authCookies for the explicit Cookie
+        // header replay path.
+        try { loadAuthCookies(); } catch (e) { /* non-fatal */ }
     } catch (e) {
         log("enable: warm-up request failed (non-fatal): " + e);
     }
