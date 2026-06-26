@@ -1,13 +1,18 @@
-const BASE_URL = "https://spankbang.com";
+// IMPORTANT: keep this on the SAME host that `authentication.loginUrl` uses
+// (https://www.spankbang.com/users/login). The Cloudflare `cf_clearance`
+// cookie captured by Grayjay's login WebView is bound to that exact host;
+// requesting the apex `spankbang.com` would skip the cookie and re-trigger
+// the Cloudflare managed challenge => HTTP 403.
+const BASE_URL = "https://www.spankbang.com";
 const PLATFORM = "SpankBang";
 const PLATFORM_CLAIMTYPE = 3;
 
 const USER_URLS = {
-    PLAYLISTS: "https://spankbang.com/users/playlists",
-    HISTORY: "https://spankbang.com/users/history",
-    SUBSCRIPTIONS: "https://spankbang.com/users/subscriptions",
-    FAVORITES: "https://spankbang.com/users/favorites",
-    PROFILE: "https://spankbang.com/users/profile"
+    PLAYLISTS: "https://www.spankbang.com/users/playlists",
+    HISTORY: "https://www.spankbang.com/users/history",
+    SUBSCRIPTIONS: "https://www.spankbang.com/users/subscriptions",
+    FAVORITES: "https://www.spankbang.com/users/favorites",
+    PROFILE: "https://www.spankbang.com/users/profile"
 };
 
 var config = {};
@@ -39,8 +44,8 @@ const CONFIG = {
         "4k": { name: "4K", width: 3840, height: 2160 }
     },
     INTERNAL_URL_SCHEME: "spankbang://profile/",
-    EXTERNAL_URL_BASE: "https://spankbang.com",
-    PORNSTAR_IMG_BASE: "https://spankbang.com/pornstarimg/f/",
+    EXTERNAL_URL_BASE: "https://www.spankbang.com",
+    PORNSTAR_IMG_BASE: "https://www.spankbang.com/pornstarimg/f/",
     SEARCH_FILTERS: {
         DURATION: {
             ANY: "",
@@ -158,19 +163,57 @@ function getXhrHeaders(referer) {
     return h;
 }
 
+
 // Authenticated GET/POST helpers. Use the persistent auth client when the runtime
 // exposes http.newClient (so cf_clearance is replayed from one jar); otherwise fall
 // back to the per-request authenticated client (http.GET/POST with useAuth=true).
+//
+// IMPORTANT: on Android (mobile Grayjay) the jar created by http.newClient(true)
+// is NOT always seeded with the cookies captured by Grayjay's login WebView
+// (cf_clearance + sb_session). Requests through it look anonymous to Cloudflare
+// and return 403. Whenever the persistent client returns 401/403 we transparently
+// retry once through http.GET(url, headers, true) which DOES use the same cookie
+// store as the login WebView.
+function _isAuthBlocked(resp) {
+    return resp && (resp.code === 401 || resp.code === 403);
+}
+
 function authGet(url, headers) {
     if (authClient && typeof authClient.GET === 'function') {
-        return authClient.GET(url, headers);
+        const resp = authClient.GET(url, headers);
+        if (_isAuthBlocked(resp)) {
+            try {
+                const fallback = http.GET(url, headers, true);
+                if (fallback && fallback.isOk) {
+                    log("authGet: persistent client got " + resp.code + ", recovered via http.GET(useAuth=true)");
+                    return fallback;
+                }
+                if (fallback && fallback.code) return fallback;
+            } catch (e) {
+                log("authGet fallback to http.GET failed: " + e);
+            }
+        }
+        return resp;
     }
     return http.GET(url, headers, true);
 }
 
 function authPost(url, body, headers) {
     if (authClient && typeof authClient.POST === 'function') {
-        return authClient.POST(url, body, headers);
+        const resp = authClient.POST(url, body, headers);
+        if (_isAuthBlocked(resp)) {
+            try {
+                const fallback = http.POST(url, body, headers, true);
+                if (fallback && fallback.isOk) {
+                    log("authPost: persistent client got " + resp.code + ", recovered via http.POST(useAuth=true)");
+                    return fallback;
+                }
+                if (fallback && fallback.code) return fallback;
+            } catch (e) {
+                log("authPost fallback to http.POST failed: " + e);
+            }
+        }
+        return resp;
     }
     return http.POST(url, body, headers, true);
 }
@@ -270,7 +313,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
         // cookies). Even when the user is not logged in this behaves like the
         // unauthenticated client, but once logged in it carries the cookies
         // needed to pass SpankBang's Cloudflare challenge.
-        const response = authGet(url, requestHeaders);
+        let response = authGet(url, requestHeaders);
         if (!response.isOk) {
             // If we get 429, add exponential backoff with multiple retries
             if (response.code === 429) {
@@ -290,6 +333,32 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                     }
                 }
             }
+
+            // 403 = Cloudflare managed challenge. Retry once after warming the
+            // homepage so the request looks like an in-session navigation (with a
+            // Referer set). This catches the case where the persistent client's
+            // jar was empty and a homepage hit causes cf_clearance / __cf_bm to
+            // be replayed/installed before we hit the deeper URL.
+            if (response.code === 403) {
+                try {
+                    log(`${context}: got 403, attempting Cloudflare warm-up via ${BASE_URL}/`);
+                    const warm = authGet(BASE_URL + "/", requestHeaders);
+                    log(`${context}: warm-up response code=${warm && warm.code}`);
+                } catch (e) {
+                    log(`${context}: warm-up request failed: ${e}`);
+                }
+                sleep(400);
+                const warmedHeaders = Object.assign({}, requestHeaders, { "Referer": BASE_URL + "/" });
+                const retry403 = authGet(url, warmedHeaders);
+                if (retry403 && retry403.isOk) {
+                    return retry403.body;
+                }
+                // Still blocked => give the user an actionable message.
+                throw new ScriptException(
+                    `${context} blocked by Cloudflare (HTTP 403). Open the SpankBang plugin's Login screen once and complete the "Just a moment" check to capture cf_clearance, then try again.`
+                );
+            }
+
             throw new ScriptException(`${context} failed with status ${response.code}`);
         }
         
@@ -4228,6 +4297,20 @@ source.enable = function(conf, settings, savedStateStr) {
             }
         }
     }
+
+    // Cloudflare warm-up: prime the persistent http client's cookie jar by
+    // hitting the homepage once. This replays any cf_clearance / sb_session
+    // captured by the login WebView through the same jar that subsequent
+    // home/search/video requests use, AND it lets Cloudflare set its
+    // __cf_bm session cookie before we touch deeper pages like
+    // /trending_videos/. Without this, the FIRST request after the plugin
+    // starts often returns 403 on mobile.
+    try {
+        const warm = authGet(BASE_URL + "/", API_HEADERS);
+        log("enable: Cloudflare warm-up GET / -> " + (warm && warm.code));
+    } catch (e) {
+        log("enable: warm-up request failed (non-fatal): " + e);
+    }
 };
 
 source.disable = function() {
@@ -5686,7 +5769,12 @@ source.getHome = function(continuationToken) {
         return new SpankBangHomeContentPager(platformVideos, hasMore, { continuationToken: nextToken });
 
     } catch (error) {
-        throw new ScriptException("Failed to get home content: " + error.message);
+        const msg = error && error.message ? error.message : String(error);
+        // Preserve the actionable Cloudflare hint from makeRequest verbatim.
+        if (/HTTP 403|Cloudflare/i.test(msg)) {
+            throw new ScriptException(msg);
+        }
+        throw new ScriptException("Failed to get home content: " + msg);
     }
 };
 
