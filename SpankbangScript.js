@@ -1,7 +1,3 @@
-// Apex host (no www.) matches the cf_clearance / __cf_bm cookies that
-// Cloudflare sets with Domain=spankbang.com, AND it matches the host most
-// users hit via Grayjay's "Open original page" button on a video, which is
-// the practical way users clear Cloudflare without logging in.
 const BASE_URL = "https://spankbang.com";
 const PLATFORM = "SpankBang";
 const PLATFORM_CLAIMTYPE = 3;
@@ -13,6 +9,7 @@ const USER_URLS = {
     FAVORITES: "https://spankbang.com/users/favorites",
     PROFILE: "https://spankbang.com/users/profile"
 };
+
 var config = {};
 let localConfig = {
     pornstarShortIds: {},
@@ -76,145 +73,32 @@ const CONFIG = {
     }
 };
 
-// Persistent authenticated HTTP client. Keeping every request in one client
-// keeps the Cloudflare cf_clearance + SpankBang session cookies in a single
-// consistent jar so they are replayed identically on each request (important
-// for the managed challenge - a rotating/clobbered cf_clearance re-triggers it).
-let authClient = null;
-
-// Default desktop Chrome UA. Overridden in source.enable() with the EXACT UA
-// that Grayjay's login browser used (config.authentication.userAgent) so the
-// cf_clearance cookie bound to that UA stays valid.
-let ACTIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-// Client Hints (Sec-CH-UA-*) MUST stay consistent with the active User-Agent.
-// SpankBang's Cloudflare returns `critical-ch: Sec-CH-UA-*`, so if the hints do
-// not match the UA the challenge re-triggers and every request returns 403.
-// We DERIVE the hints from the UA instead of hardcoding a Chrome version.
-function buildClientHints(ua) {
-    ua = ua || "";
-    const isMobile = /Android|Mobile|iPhone|iPad/i.test(ua);
-    let platform = "Windows", platformVersion = "15.0.0";
-    if (/Android/i.test(ua)) { platform = "Android"; platformVersion = "14.0.0"; }
-    else if (/Macintosh|Mac OS X/i.test(ua)) { platform = "macOS"; platformVersion = "14.0.0"; }
-    else if (/Linux/i.test(ua) && !/Android/i.test(ua)) { platform = "Linux"; platformVersion = "6.0.0"; }
-
-    const major = (ua.match(/Chrome\/(\d+)/) || [null, "131"])[1];
-    const full = (ua.match(/Chrome\/([\d.]+)/) || [null, major + ".0.0.0"])[1];
-
-    return {
-        "sec-ch-ua": `"Google Chrome";v="${major}", "Chromium";v="${major}", "Not_A Brand";v="24"`,
-        "sec-ch-ua-mobile": isMobile ? "?1" : "?0",
-        "sec-ch-ua-platform": `"${platform}"`,
-        "sec-ch-ua-platform-version": `"${platformVersion}"`,
-        "sec-ch-ua-arch": isMobile ? "\"\"" : "\"x86\"",
-        "sec-ch-ua-bitness": isMobile ? "\"\"" : "\"64\"",
-        "sec-ch-ua-model": "\"\"",
-        "sec-ch-ua-full-version": `"${full}"`,
-        "sec-ch-ua-full-version-list": `"Google Chrome";v="${full}", "Chromium";v="${full}", "Not_A Brand";v="24.0.0.0"`
-    };
-}
-
-// Headers for top-level page (document) navigations.
-const API_HEADERS = Object.assign({
-    "User-Agent": ACTIVE_UA,
+// IMPORTANT: The User-Agent here MUST match config.authentication.userAgent
+// (the UA used by Grayjay's login web browser). SpankBang sits behind a
+// Cloudflare managed challenge and the cf_clearance cookie obtained during
+// login is bound to that exact User-Agent. A mismatch (e.g. an Android mobile
+// UA) makes cf_clearance invalid and every request returns HTTP 403.
+// The full Sec-CH-UA-* Client Hints below are explicitly required by
+// SpankBang's Cloudflare config (see the `critical-ch` response header).
+const API_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9"
-}, buildClientHints(ACTIVE_UA), {
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-ch-ua-platform-version": "\"15.0.0\"",
+    "sec-ch-ua-arch": "\"x86\"",
+    "sec-ch-ua-bitness": "\"64\"",
+    "sec-ch-ua-model": "\"\"",
+    "sec-ch-ua-full-version": "\"131.0.6778.86\"",
+    "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"131.0.6778.86\", \"Chromium\";v=\"131.0.6778.86\", \"Not_A Brand\";v=\"24.0.0.0\"",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1"
-});
-
-// Re-apply a UA everywhere (UA + matching Client Hints). Called from source.enable.
-function applyUserAgent(ua) {
-    if (!ua) return;
-    ACTIVE_UA = ua;
-    API_HEADERS["User-Agent"] = ua;
-    const hints = buildClientHints(ua);
-    for (const k in hints) API_HEADERS[k] = hints[k];
-}
-
-// Headers for XHR / fetch (AJAX) API calls. Browsers send a DIFFERENT Sec-Fetch
-// set for fetch() than for navigations; reusing navigation values (Sec-Fetch-Mode:
-// navigate, Sec-Fetch-User: ?1, Upgrade-Insecure-Requests) on an AJAX request is a
-// Cloudflare bot signal, so we build a clean XHR header set that matches the UA.
-function getXhrHeaders(referer) {
-    const hints = buildClientHints(ACTIVE_UA);
-    const h = {
-        "User-Agent": ACTIVE_UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": BASE_URL,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "sec-ch-ua": hints["sec-ch-ua"],
-        "sec-ch-ua-mobile": hints["sec-ch-ua-mobile"],
-        "sec-ch-ua-platform": hints["sec-ch-ua-platform"]
-    };
-    if (referer) h["Referer"] = referer;
-    return h;
-}
-
-
-// Authenticated GET/POST helpers. Use the persistent auth client when the runtime
-// exposes http.newClient (so cf_clearance is replayed from one jar); otherwise fall
-// back to the per-request authenticated client (http.GET/POST with useAuth=true).
-//
-// IMPORTANT: on Android (mobile Grayjay) the jar created by http.newClient(true)
-// is NOT always seeded with the cookies captured by Grayjay's login WebView
-// (cf_clearance + sb_session). Requests through it look anonymous to Cloudflare
-// and return 403. Whenever the persistent client returns 401/403 we transparently
-// retry once through http.GET(url, headers, true) which DOES use the same cookie
-// store as the login WebView.
-function _isAuthBlocked(resp) {
-    return resp && (resp.code === 401 || resp.code === 403);
-}
-
-function authGet(url, headers) {
-    if (authClient && typeof authClient.GET === 'function') {
-        const resp = authClient.GET(url, headers);
-        if (_isAuthBlocked(resp)) {
-            try {
-                const fallback = http.GET(url, headers, true);
-                if (fallback && fallback.isOk) {
-                    log("authGet: persistent client got " + resp.code + ", recovered via http.GET(useAuth=true)");
-                    return fallback;
-                }
-                if (fallback && fallback.code) return fallback;
-            } catch (e) {
-                log("authGet fallback to http.GET failed: " + e);
-            }
-        }
-        return resp;
-    }
-    return http.GET(url, headers, true);
-}
-
-function authPost(url, body, headers) {
-    if (authClient && typeof authClient.POST === 'function') {
-        const resp = authClient.POST(url, body, headers);
-        if (_isAuthBlocked(resp)) {
-            try {
-                const fallback = http.POST(url, body, headers, true);
-                if (fallback && fallback.isOk) {
-                    log("authPost: persistent client got " + resp.code + ", recovered via http.POST(useAuth=true)");
-                    return fallback;
-                }
-                if (fallback && fallback.code) return fallback;
-            } catch (e) {
-                log("authPost fallback to http.POST failed: " + e);
-            }
-        }
-        return resp;
-    }
-    return http.POST(url, body, headers, true);
-}
+};
 
 const REGEX_PATTERNS = {
     urls: {
@@ -271,27 +155,14 @@ const REGEX_PATTERNS = {
     }
 };
 
-
 function getAuthHeaders() {
-    const h = { ...API_HEADERS };
-    // On Android, Grayjay's authenticated http client jar is NOT always
-    // populated from the in-app WebView (especially when the user is not
-    // logged in but DID clear Cloudflare by opening the video page in
-    // "Open original page"). In that case http.GET(useAuth=true) sends no
-    // cookies and we get HTTP 403. As a safety net we replay whatever
-    // cookies we DID capture (cf_clearance, __cf_bm, sb_session, ...) via
-    // an explicit Cookie header.
-    //
-    // Note: this is the inverse of the v93 stance. v93 worried that a
-    // manual Cookie header would clobber a rotating cf_clearance; but if
-    // the jar is empty there is nothing to clobber, and a stale Cookie
-    // header is strictly better than no cookies at all. When Grayjay does
-    // populate the jar, both paths send the same cf_clearance value, so
-    // there is no conflict.
-    if (state && state.authCookies && state.authCookies.length > 0) {
-        h["Cookie"] = state.authCookies;
-    }
-    return h;
+    // Cookies (including the Cloudflare cf_clearance cookie and the SpankBang
+    // session cookies captured during login) are applied automatically by
+    // Grayjay's authenticated HTTP client when a request is made with
+    // useAuth=true. We deliberately do NOT inject a manual Cookie header here:
+    // a static Cookie header can clobber the auth client's rotating
+    // cf_clearance value and re-trigger Cloudflare's "Just a moment" challenge.
+    return { ...API_HEADERS };
 }
 
 function sleep(ms) {
@@ -320,11 +191,11 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
         enforceRateLimit();
         
         const requestHeaders = headers || getAuthHeaders();
-        // Always use Grayjay's authenticated client (cf_clearance + session
-        // cookies). Even when the user is not logged in this behaves like the
-        // unauthenticated client, but once logged in it carries the cookies
-        // needed to pass SpankBang's Cloudflare challenge.
-        let response = authGet(url, requestHeaders);
+        // Always use Grayjay's authenticated client (useAuth=true). Even when
+        // the user is not logged in this behaves like the unauthenticated
+        // client, but once logged in it carries the cf_clearance + session
+        // cookies needed to pass SpankBang's Cloudflare challenge.
+        const response = http.GET(url, requestHeaders, true);
         if (!response.isOk) {
             // If we get 429, add exponential backoff with multiple retries
             if (response.code === 429) {
@@ -336,7 +207,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                 
                 // Retry up to 3 times
                 if (localConfig.consecutiveErrors < 3) {
-                    const retryResponse = authGet(url, requestHeaders);
+                    const retryResponse = http.GET(url, requestHeaders, true);
                     if (retryResponse.isOk) {
                         localConfig.consecutiveErrors = 0; // Reset on success
                         localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8); // Slowly decrease
@@ -344,32 +215,6 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                     }
                 }
             }
-
-            // 403 = Cloudflare managed challenge. Retry once after warming the
-            // homepage so the request looks like an in-session navigation (with a
-            // Referer set). This catches the case where the persistent client's
-            // jar was empty and a homepage hit causes cf_clearance / __cf_bm to
-            // be replayed/installed before we hit the deeper URL.
-            if (response.code === 403) {
-                try {
-                    log(`${context}: got 403, attempting Cloudflare warm-up via ${BASE_URL}/`);
-                    const warm = authGet(BASE_URL + "/", requestHeaders);
-                    log(`${context}: warm-up response code=${warm && warm.code}`);
-                } catch (e) {
-                    log(`${context}: warm-up request failed: ${e}`);
-                }
-                sleep(400);
-                const warmedHeaders = Object.assign({}, requestHeaders, { "Referer": BASE_URL + "/" });
-                const retry403 = authGet(url, warmedHeaders);
-                if (retry403 && retry403.isOk) {
-                    return retry403.body;
-                }
-                // Still blocked => give the user an actionable message.
-                throw new ScriptException(
-                    `${context} blocked by Cloudflare (HTTP 403). Open the SpankBang plugin's Login screen once and complete the "Just a moment" check to capture cf_clearance, then try again.`
-                );
-            }
-
             throw new ScriptException(`${context} failed with status ${response.code}`);
         }
         
@@ -392,7 +237,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         
         const requestHeaders = headers || getAuthHeaders();
         // Always use the authenticated client so cf_clearance is applied.
-        const response = authGet(url, requestHeaders);
+        const response = http.GET(url, requestHeaders, true);
         
         // If we get 429, add exponential backoff and retry
         if (!response.isOk && response.code === 429) {
@@ -404,7 +249,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             
             // Retry up to 3 times
             if (localConfig.consecutiveErrors < 3) {
-                const retryResponse = authGet(url, requestHeaders);
+                const retryResponse = http.GET(url, requestHeaders, useAuth);
                 if (retryResponse.isOk) {
                     localConfig.consecutiveErrors = 0;
                     localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8);
@@ -1910,10 +1755,25 @@ function parseVideoPage(html, url) {
         if (streamKeyMatch) {
             const streamKey = streamKeyMatch[1];
             try {
-                const streamResponse = authPost(
+                const streamResponse = http.POST(
                     "https://spankbang.com/api/videos/stream",
                     "id=" + streamKey + "&data=0",
-                    getXhrHeaders(url)
+                    {
+                        "User-Agent": API_HEADERS["User-Agent"],
+                        "Accept": "application/json, text/plain, */*",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Referer": url,
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Origin": "https://spankbang.com",
+                        "sec-ch-ua": API_HEADERS["sec-ch-ua"],
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": "\"Windows\"",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin"
+                    },
+                    true
                 );
 
                 if (streamResponse.isOk && streamResponse.body) {
@@ -3978,10 +3838,25 @@ function fetchCommentsFromApi(videoId) {
     
     try {
         const commentsApiUrl = `${BASE_URL}/api/video/comments`;
-        const response = authPost(
+        const response = http.POST(
             commentsApiUrl,
             `id=${videoId}&page=1`,
-            getXhrHeaders(`${BASE_URL}/${videoId}/video/`)
+            {
+                "User-Agent": API_HEADERS["User-Agent"],
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": `${BASE_URL}/${videoId}/video/`,
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": BASE_URL,
+                "sec-ch-ua": API_HEADERS["sec-ch-ua"],
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin"
+            },
+            true
         );
         
         if (response.isOk && response.body) {
@@ -4022,12 +3897,8 @@ function fetchCommentsFromApi(videoId) {
 function hasValidAuthCookie(cookies) {
     if (!cookies) return false;
     
-    // cf_clearance / __cf_bm are Cloudflare's challenge-cleared markers. We
-    // accept them as "valid" cookie state because just having them is enough
-    // to pass Cloudflare on subsequent plugin requests, even without an
-    // actual SpankBang account session.
-    const validCookieNames = ['sb_session', 'session_token', 'remember_token', 'user_id', 'logged_in', 'cf_clearance', '__cf_bm'];
-
+    const validCookieNames = ['sb_session', 'session_token', 'remember_token', 'user_id', 'logged_in'];
+    
     if (typeof cookies === 'string') {
         if (cookies.length === 0) return false;
         for (const name of validCookieNames) {
@@ -4237,22 +4108,8 @@ source.enable = function(conf, settings, savedStateStr) {
     // login browser uses (config.authentication.userAgent). This is critical:
     // SpankBang's Cloudflare cf_clearance cookie is bound to the exact UA used
     // when the challenge was solved during login. Any mismatch => HTTP 403.
-    // applyUserAgent() also recomputes the Sec-CH-UA-* Client Hints so they stay
-    // consistent with the UA (Cloudflare validates them via `critical-ch`).
     if (config && config.authentication && config.authentication.userAgent) {
-        applyUserAgent(config.authentication.userAgent);
-    }
-
-    // Create one persistent authenticated client so cf_clearance + session
-    // cookies are replayed from a single consistent cookie jar on every request.
-    if (authClient === null && typeof http !== 'undefined' && typeof http.newClient === 'function') {
-        try {
-            authClient = http.newClient(true);
-            log("enable: created persistent authenticated http client");
-        } catch (e) {
-            authClient = null;
-            log("enable: http.newClient unavailable, falling back to http.GET(useAuth): " + e);
-        }
+        API_HEADERS["User-Agent"] = config.authentication.userAgent;
     }
     
     log("===== PLUGIN ENABLE CALLED =====");
@@ -4300,19 +4157,8 @@ source.enable = function(conf, settings, savedStateStr) {
         }
     }
     
-    // ALWAYS try to load whatever cookies the in-app WebView has captured
-    // for spankbang.com - including cf_clearance / __cf_bm from a casual
-    // "Open original page" visit on a video. Previously this was gated on
-    // bridge.isLoggedIn() which only returns true after a credentialed
-    // login, so anonymous-but-cleared sessions were ignored and every
-    // request went out without cf_clearance => HTTP 403.
-    try {
-        loadAuthCookies();
-    } catch (e) {
-        log("enable: loadAuthCookies failed (non-fatal): " + e);
-    }
-
     if (typeof bridge !== 'undefined' && bridge.isLoggedIn && bridge.isLoggedIn()) {
+        loadAuthCookies();
         state.isAuthenticated = true;
         
         if (!state.username || state.username.length === 0) {
@@ -4323,31 +4169,12 @@ source.enable = function(conf, settings, savedStateStr) {
             }
         }
     }
-
-    // Cloudflare warm-up: prime the persistent http client's cookie jar by
-    // hitting the homepage once. This replays any cf_clearance / sb_session
-    // captured by the login WebView through the same jar that subsequent
-    // home/search/video requests use, AND it lets Cloudflare set its
-    // __cf_bm session cookie before we touch deeper pages like
-    // /trending_videos/. Without this, the FIRST request after the plugin
-    // starts often returns 403 on mobile.
-    try {
-        const warm = authGet(BASE_URL + "/", getAuthHeaders());
-        log("enable: Cloudflare warm-up GET / -> " + (warm && warm.code));
-        // Re-pull cookies AFTER the warm-up so any __cf_bm Cloudflare just
-        // set is captured into state.authCookies for the explicit Cookie
-        // header replay path.
-        try { loadAuthCookies(); } catch (e) { /* non-fatal */ }
-    } catch (e) {
-        log("enable: warm-up request failed (non-fatal): " + e);
-    }
 };
 
 source.disable = function() {
     state.sessionCookie = "";
     state.isAuthenticated = false;
     state.authCookies = "";
-    authClient = null;
 };
 
 source.saveState = function() {
@@ -5799,12 +5626,7 @@ source.getHome = function(continuationToken) {
         return new SpankBangHomeContentPager(platformVideos, hasMore, { continuationToken: nextToken });
 
     } catch (error) {
-        const msg = error && error.message ? error.message : String(error);
-        // Preserve the actionable Cloudflare hint from makeRequest verbatim.
-        if (/HTTP 403|Cloudflare/i.test(msg)) {
-            throw new ScriptException(msg);
-        }
-        throw new ScriptException("Failed to get home content: " + msg);
+        throw new ScriptException("Failed to get home content: " + error.message);
     }
 };
 
