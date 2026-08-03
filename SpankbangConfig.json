@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 91,
+  "version": 92,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -29,18 +29,31 @@
     ".cdn3.spankbang.com",
     ".cdn4.spankbang.com",
     "tbi.sb-cd.com",
-    "challenges.cloudflare.com"
+    "challenges.cloudflare.com",
+    ".cloudflare.com",
+    "static.cloudflareinsights.com",
+    "cdnjs.cloudflare.com"
   ],
   "authentication": {
-    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "loginUrl": "https://www.spankbang.com/users/login",
-    "cookiesToFind": ["sb_session"],
+    "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
+    "loginUrl": "https://spankbang.com/",
+    "completionUrl": "https://spankbang.com/",
+    "cookiesToFind": ["cf_clearance"],
     "cookiesExclOthers": false
   },
   "subscriptionRateLimit": 150,
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "92": [
+      "CRITICAL FIX: Cloudflare 'Verify you are human' loop that kept spinning and reloading in the login webview",
+      "Root cause: previous config claimed Windows Chrome UA but Grayjay's WebView is actually Android -- Cloudflare Turnstile fingerprint-checks WebGL/canvas/screen against the UA and refused to issue cf_clearance",
+      "Both authentication.userAgent and the plugin's runtime API_HEADERS now use an Android Chrome 131 UA that matches the WebView reality, plus sec-ch-ua-mobile: ?1 and sec-ch-ua-platform: Android",
+      "authentication.loginUrl changed from /users/login to https://spankbang.com/ -- Cloudflare is far less aggressive on the homepage than on the login endpoint, so Turnstile passes on the first try",
+      "authentication.cookiesToFind changed from sb_session to cf_clearance -- the webview now closes as soon as the Cloudflare challenge is solved, without forcing you to actually type SpankBang credentials",
+      "Added completionUrl matching the homepage so Grayjay closes the webview cleanly",
+      "Allowlisted the broader .cloudflare.com plus static.cloudflareinsights.com and cdnjs.cloudflare.com so every asset Turnstile pulls in can load"
+    ],
     "91": [
       "CRITICAL FIX: 403 errors on home / search / video load caused by SpankBang moving behind Cloudflare Managed Challenge",
       "All HTTP requests now route through Grayjay's authenticated client so cf_clearance & __cf_bm cookies (obtained by the login webview) are automatically sent",

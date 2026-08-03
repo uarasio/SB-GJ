@@ -76,13 +76,17 @@ const CONFIG = {
 // NOTE: User-Agent MUST match SpankbangConfig.json -> authentication.userAgent
 // so Cloudflare associates the cf_clearance cookie obtained in the login webview
 // with the same UA the plugin uses at runtime. If they diverge, CF returns 403.
+// We use Android Chrome to match Grayjay's actual WebView platform -- if we
+// claim "Windows Chrome" on an Android WebView, Cloudflare Turnstile detects
+// the fingerprint mismatch (WebGL / canvas / screen) and refuses to issue
+// cf_clearance no matter how many times you tap "Verify you are human".
 const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-ch-ua-mobile": "?1",
+    "sec-ch-ua-platform": "\"Android\"",
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
