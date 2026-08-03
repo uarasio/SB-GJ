@@ -217,8 +217,11 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
                 }
                 throw new ScriptException(
                     `${context} was blocked by SpankBang (Cloudflare 403). ` +
-                    `Please sign in to SpankBang from the Grayjay source settings ` +
-                    `so the Cloudflare challenge can be solved in the login webview.`
+                    `Open the sign-in webview from Grayjay source settings ONCE ` +
+                    `so the Cloudflare challenge can be solved. You can either ` +
+                    `complete the SpankBang login for personalized features, ` +
+                    `OR just wait for the green Turnstile checkmark and close ` +
+                    `the webview via back button to browse as a guest.`
                 );
             }
             throw new ScriptException(`${context} failed with status ${response.code}`);
@@ -3898,24 +3901,35 @@ function fetchCommentsFromApi(videoId) {
 
 function hasValidAuthCookie(cookies) {
     if (!cookies) return false;
-    
-    const validCookieNames = ['sb_session', 'session_token', 'remember_token', 'user_id', 'logged_in'];
-    
+
+    // Broadened v94: SpankBang stopped setting sb_session after the Cloudflare rollout.
+    // Accept any plausible session cookie name so isLoggedIn() actually returns true
+    // after a successful login regardless of which cookie SB currently issues.
+    const validCookieNames = [
+        'sb_session', 'sessionid', 'session_id', 'sb_user_id', 'sb_uid',
+        'user_id', 'logged_in', 'remember_token', 'session_token'
+    ];
+
     if (typeof cookies === 'string') {
         if (cookies.length === 0) return false;
         for (const name of validCookieNames) {
-            if (cookies.includes(name + '=')) {
+            // Match "name=" but only when it's a real cookie boundary (start, or after "; ")
+            const re = new RegExp('(?:^|;\\s*)' + name + '=([^;]+)');
+            const m = cookies.match(re);
+            if (m && m[1] && m[1].length > 0) {
+                log("hasValidAuthCookie: matched cookie '" + name + "'");
                 return true;
             }
         }
         return false;
     }
-    
+
     if (Array.isArray(cookies)) {
         for (const cookie of cookies) {
             if (cookie && typeof cookie === 'object') {
                 if (validCookieNames.includes(cookie.name)) {
                     if (cookie.value && cookie.value.length > 0) {
+                        log("hasValidAuthCookie: matched cookie '" + cookie.name + "'");
                         return true;
                     }
                 }
@@ -3923,16 +3937,17 @@ function hasValidAuthCookie(cookies) {
         }
         return false;
     }
-    
+
     if (typeof cookies === 'object' && cookies !== null) {
         for (const name of validCookieNames) {
             if (cookies[name]) {
+                log("hasValidAuthCookie: matched cookie '" + name + "'");
                 return true;
             }
         }
         return false;
     }
-    
+
     return false;
 }
 
@@ -4004,7 +4019,7 @@ function loadAuthCookies() {
             }
         }
         
-        log("No valid auth cookies found (looking for sb_session, session_token, remember_token, user_id, logged_in)");
+        log("No valid auth cookies found (looking for sb_session, sessionid, session_id, sb_user_id, sb_uid, user_id, logged_in, remember_token, session_token)");
     } catch (e) {
         log("Failed to load auth cookies: " + e);
     }
@@ -7108,4 +7123,4 @@ class SpankBangHistoryPager extends VideoPager {
     }
 }
 
-log("SpankBang plugin loaded - v90");
+log("SpankBang plugin loaded - v94");

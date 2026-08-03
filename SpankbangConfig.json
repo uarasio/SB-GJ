@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 93,
+  "version": 94,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -38,13 +38,21 @@
     "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
     "loginUrl": "https://spankbang.com/users/login",
     "completionUrl": "https://spankbang.com/",
-    "cookiesToFind": ["sb_session"],
+    "cookiesToFind": ["sb_session", "sessionid", "session_id", "sb_user_id", "sb_uid", "user_id", "logged_in", "remember_token"],
     "cookiesExclOthers": false
   },
   "subscriptionRateLimit": 150,
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "94": [
+      "CRITICAL FIX: Login webview never closed after a successful SpankBang sign-in because the site no longer sets a cookie called sb_session -- Grayjay was waiting forever for a cookie name that doesn't exist anymore",
+      "authentication.cookiesToFind now accepts any of: sb_session, sessionid, session_id, sb_user_id, sb_uid, user_id, logged_in, remember_token -- webview closes as soon as ANY real session cookie is issued by SpankBang",
+      "hasValidAuthCookie() in the script broadened to the same list, so isLoggedIn() correctly returns true after login regardless of which cookie name SpankBang currently uses",
+      "GUEST MODE: Requests that hit Cloudflare 403 without an authenticated session no longer throw a hard error -- they now return an empty pager and log a warning so the app doesn't crash while browsing without login",
+      "To browse WITHOUT logging in: open the sign-in webview from source settings, wait for Cloudflare Turnstile to pass (green checkmark), then just close the webview via the back button. cf_clearance stays in Grayjay's cookie jar and is auto-attached to subsequent requests",
+      "Diagnostic: on login, the plugin now logs exactly which cookie name matched so future SpankBang cookie renames can be diagnosed in one step"
+    ],
     "93": [
       "FIX: v92 was closing the login webview the instant Cloudflare issued cf_clearance, so users never got a chance to actually type their SpankBang credentials",
       "authentication.loginUrl reverted to https://spankbang.com/users/login so the SpankBang login form loads directly",
