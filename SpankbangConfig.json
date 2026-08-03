@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 92,
+  "version": 93,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -36,15 +36,23 @@
   ],
   "authentication": {
     "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
-    "loginUrl": "https://spankbang.com/",
+    "loginUrl": "https://spankbang.com/users/login",
     "completionUrl": "https://spankbang.com/",
-    "cookiesToFind": ["cf_clearance"],
+    "cookiesToFind": ["sb_session"],
     "cookiesExclOthers": false
   },
   "subscriptionRateLimit": 150,
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "93": [
+      "FIX: v92 was closing the login webview the instant Cloudflare issued cf_clearance, so users never got a chance to actually type their SpankBang credentials",
+      "authentication.loginUrl reverted to https://spankbang.com/users/login so the SpankBang login form loads directly",
+      "authentication.cookiesToFind reverted to sb_session so the webview stays open until you're actually signed in",
+      "Kept the v92 Android WebView-matching User-Agent so Turnstile still passes on the first tap -- cf_clearance is captured alongside sb_session in the same webview session",
+      "completionUrl kept at the homepage so Grayjay reliably closes the webview after successful login",
+      "Guest browsing without signing in also still works: the CF challenge is now solved on the very first API request via the retry-through-auth path added in v91"
+    ],
     "92": [
       "CRITICAL FIX: Cloudflare 'Verify you are human' loop that kept spinning and reloading in the login webview",
       "Root cause: previous config claimed Windows Chrome UA but Grayjay's WebView is actually Android -- Cloudflare Turnstile fingerprint-checks WebGL/canvas/screen against the UA and refused to issue cf_clearance",
