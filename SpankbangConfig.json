@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 90,
+  "version": 91,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -28,7 +28,8 @@
     ".cdn2.spankbang.com",
     ".cdn3.spankbang.com",
     ".cdn4.spankbang.com",
-    "tbi.sb-cd.com"
+    "tbi.sb-cd.com",
+    "challenges.cloudflare.com"
   ],
   "authentication": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -40,6 +41,15 @@
   "supportedClaimTypes": [3],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "91": [
+      "CRITICAL FIX: 403 errors on home / search / video load caused by SpankBang moving behind Cloudflare Managed Challenge",
+      "All HTTP requests now route through Grayjay's authenticated client so cf_clearance & __cf_bm cookies (obtained by the login webview) are automatically sent",
+      "Added retry-through-auth fallback: any request that hits a Cloudflare 403 is automatically retried with cookies attached",
+      "Updated plugin User-Agent to modern desktop Chrome and added the sec-ch-ua / sec-fetch-* client hint headers Cloudflare now requires",
+      "Aligned authentication webview User-Agent with plugin runtime User-Agent (Cloudflare binds cf_clearance to the exact UA that solved the challenge)",
+      "Allowlisted challenges.cloudflare.com so the CF challenge iframe can load inside the login webview",
+      "Friendlier error message asks the user to sign in via source settings if CF challenge still isn't solved"
+    ],
     "90": [
       "FIX: Always use ?page=X URL format (even for page 1)",
       "Simplified pagination logic - keeps fetching until page returns 0 videos",

@@ -73,10 +73,22 @@ const CONFIG = {
     }
 };
 
+// NOTE: User-Agent MUST match SpankbangConfig.json -> authentication.userAgent
+// so Cloudflare associates the cf_clearance cookie obtained in the login webview
+// with the same UA the plugin uses at runtime. If they diverge, CF returns 403.
 const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-origin",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+    "Referer": "https://spankbang.com/"
 };
 
 const REGEX_PATTERNS = {
@@ -162,7 +174,7 @@ function enforceRateLimit() {
     localConfig.lastRequestTime = Date.now();
 }
 
-function makeRequest(url, headers = null, context = 'request', useAuth = false) {
+function makeRequest(url, headers = null, context = 'request', useAuth = true) {
     try {
         // Enforce rate limiting before making the request
         enforceRateLimit();
@@ -188,6 +200,23 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
                     }
                 }
             }
+            // 403 from Cloudflare = challenge not yet solved. Retry via the
+            // authenticated client which shares cookies with the login webview
+            // (that webview has already solved the challenge and stored
+            // cf_clearance / __cf_bm). If that ALSO fails, tell the user to
+            // sign in so Grayjay opens the webview and refreshes cookies.
+            if (response.code === 403) {
+                if (!useAuth) {
+                    log(`${context}: got 403, retrying via authenticated client to pick up cf_clearance cookie`);
+                    const authRetry = http.GET(url, requestHeaders, true);
+                    if (authRetry.isOk) return authRetry.body;
+                }
+                throw new ScriptException(
+                    `${context} was blocked by SpankBang (Cloudflare 403). ` +
+                    `Please sign in to SpankBang from the Grayjay source settings ` +
+                    `so the Cloudflare challenge can be solved in the login webview.`
+                );
+            }
             throw new ScriptException(`${context} failed with status ${response.code}`);
         }
         
@@ -203,7 +232,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = false) 
     }
 }
 
-function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = false) {
+function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = true) {
     try {
         // Enforce rate limiting before making the request
         enforceRateLimit();
@@ -228,6 +257,17 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
                 }
                 return { isOk: retryResponse.isOk, code: retryResponse.code, body: retryResponse.body };
             }
+        }
+
+        // Cloudflare 403 -> retry through the authenticated client so we pick up
+        // the cf_clearance / __cf_bm cookies obtained by the login webview.
+        if (!response.isOk && response.code === 403 && !useAuth) {
+            log(`${context}: got 403, retrying via authenticated client to pick up cf_clearance cookie`);
+            const authRetry = http.GET(url, requestHeaders, true);
+            if (authRetry.isOk) {
+                return { isOk: true, code: authRetry.code, body: authRetry.body };
+            }
+            return { isOk: false, code: authRetry.code, body: authRetry.body };
         }
         
         // Reset on successful request
