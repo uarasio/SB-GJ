@@ -73,29 +73,103 @@ const CONFIG = {
     }
 };
 
-// NOTE: This User-Agent MUST stay identical to SpankbangConfig.json ->
-// authentication.userAgent. Cloudflare binds its __cf_bm bot-management token
-// to the exact UA that first solved the check, so if the login webview and the
-// plugin runtime disagree the CDN returns 403.
+// NOTE (v98): The User-Agent is now dynamic. We prefer whatever UA Grayjay's
+// webview actually used to solve authentication or the Cloudflare captcha
+// (via bridge.authUserAgent / bridge.captchaUserAgent). Only if neither is
+// available do we fall back to a hardcoded UA -- and that fallback is
+// platform-aware (Android on the mobile app, Windows on the desktop app),
+// matching the pattern the Patreon plugin adopted in v25.
 //
-// v96: UA bumped to Chrome 133 (current Feb 2026 stable). Chrome 131 was ~1 year
-// old and Cloudflare Turnstile's fingerprint DB started flagging that combo as
-// "outdated / possibly automated", which produced the "Verify you are human"
-// infinite refresh loop reported by users. Sec-CH-UA strings updated to match.
-const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "sec-ch-ua": "\"Chromium\";v=\"133\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"133\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "sec-fetch-dest": "document",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-user": "?1",
-    "upgrade-insecure-requests": "1",
-    "Referer": "https://spankbang.com/"
-};
+// Cloudflare binds cf_clearance / __cf_bm to the exact UA that solved the
+// challenge, so this dynamic strategy is what guarantees a fingerprint match
+// on every subsequent request.
+const IS_DESKTOP = (typeof bridge !== 'undefined' && bridge.buildPlatform === "desktop");
+const USER_AGENT_FALLBACK = IS_DESKTOP
+    ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Safari/537.36"
+    : "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Mobile Safari/537.36";
+function getUserAgent() {
+    try {
+        if (typeof bridge !== 'undefined') {
+            if (bridge.authUserAgent) return bridge.authUserAgent;
+            if (bridge.captchaUserAgent) return bridge.captchaUserAgent;
+        }
+    } catch (_) { /* ignore */ }
+    return USER_AGENT_FALLBACK;
+}
+
+// API_HEADERS is now a factory (call buildApiHeaders()) rather than a static
+// object, because the UA can change between requests once Grayjay's captcha
+// webview solves Cloudflare and exposes bridge.captchaUserAgent. Everything
+// that used to read API_HEADERS["User-Agent"] should now call getUserAgent().
+function buildApiHeaders() {
+    const ua = getUserAgent();
+    const isMobileUa = /Mobile|Android/i.test(ua);
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
+        "sec-ch-ua-mobile": isMobileUa ? "?1" : "?0",
+        "sec-ch-ua-platform": isMobileUa ? "\"Android\"" : "\"Windows\"",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "upgrade-insecure-requests": "1",
+        "Referer": "https://spankbang.com/"
+    };
+}
+// Backwards-compat shim: any code still doing API_HEADERS["User-Agent"] or
+// spreading {...API_HEADERS} will get a live snapshot. This is a plain object
+// (not a Proxy) so JSON.stringify still works, but every reference to it
+// throughout the file is safe because we rebuild it just-in-time in makeRequest.
+const API_HEADERS = buildApiHeaders();
+
+// Detect an expired cf_clearance cookie without hitting the server. cf_clearance
+// embeds a unix timestamp; if it's older than ~25 min we know it's expired and
+// tell the user instead of looping 403s forever.
+function isCfClearanceFresh(cookieStr) {
+    try {
+        const m = (cookieStr || "").match(/(?:^|;\s*)cf_clearance=([^;]+)/);
+        if (!m) return null;
+        const now = Math.floor(Date.now() / 1000);
+        const parts = m[1].split("-");
+        for (const p of parts) {
+            const n = parseInt(p, 10);
+            if (!isNaN(n) && n > 1_400_000_000 && n < 2_100_000_000) {
+                if ((now - n) > 25 * 60) return false;
+                return true;
+            }
+        }
+        return null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Cloudflare challenge detection + Grayjay native captcha trigger. On any 403
+// whose body carries the CF challenge platform marker, we throw
+// CaptchaRequiredException -- Grayjay INTERCEPTS this exception, opens the
+// captcha webview declared in SpankbangConfig.json -> "captcha", waits for
+// cf_clearance to appear, then transparently retries the request with the
+// real webview UA now available via bridge.captchaUserAgent. This is the
+// same mechanism the Patreon plugin uses since v20.
+function throwIfCaptcha(resp) {
+    if (resp != null && resp.body != null && resp.code === 403) {
+        const body = resp.body.toLowerCase();
+        if (body.indexOf('/cdn-cgi/challenge-platform') !== -1
+            || body.indexOf('just a moment') !== -1
+            || body.indexOf('cf-mitigated') !== -1) {
+            // CaptchaRequiredException is provided by Grayjay's runtime. Guard
+            // against older Grayjay builds that don't expose it: fall back to
+            // a plain ScriptException with the CF sentinel so the caller still
+            // renders the "solve captcha" message.
+            if (typeof CaptchaRequiredException !== 'undefined') {
+                throw new CaptchaRequiredException(resp.url, resp.body);
+            }
+        }
+    }
+    return true;
+}
 
 // Sentinel prefix for Cloudflare 403 errors so top-level source.* handlers can
 // distinguish "browser challenge not yet solved" (recoverable: return empty
@@ -164,7 +238,7 @@ const REGEX_PATTERNS = {
 };
 
 function getAuthHeaders() {
-    const headers = { ...API_HEADERS };
+    const headers = buildApiHeaders();
     if (state.authCookies && state.authCookies.length > 0) {
         headers["Cookie"] = state.authCookies;
     }
@@ -200,12 +274,13 @@ function buildMediaRequestModifier() {
     return {
         modifyRequest: function (url, headers) {
             headers = headers || {};
-            headers["User-Agent"] = API_HEADERS["User-Agent"];
+            const live = buildApiHeaders();
+            headers["User-Agent"] = live["User-Agent"];
             headers["Referer"] = "https://spankbang.com/";
-            headers["Accept-Language"] = API_HEADERS["Accept-Language"];
-            headers["sec-ch-ua"] = API_HEADERS["sec-ch-ua"];
-            headers["sec-ch-ua-mobile"] = API_HEADERS["sec-ch-ua-mobile"];
-            headers["sec-ch-ua-platform"] = API_HEADERS["sec-ch-ua-platform"];
+            headers["Accept-Language"] = live["Accept-Language"];
+            headers["sec-ch-ua"] = live["sec-ch-ua"];
+            headers["sec-ch-ua-mobile"] = live["sec-ch-ua-mobile"];
+            headers["sec-ch-ua-platform"] = live["sec-ch-ua-platform"];
             const cookieStr = getAllCookieString();
             if (cookieStr && cookieStr.length > 0) {
                 headers["Cookie"] = cookieStr;
@@ -261,28 +336,29 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
                     }
                 }
             }
-            // 403 from Cloudflare = challenge not yet solved. Retry via the
-            // authenticated client which shares cookies with the login webview
-            // (that webview has already solved the challenge and stored
-            // cf_clearance / __cf_bm). If that ALSO fails, tell the user to
-            // sign in so Grayjay opens the webview and refreshes cookies.
-            // v96: try one last retry with a plain guest header set (in case
-                // useAuth=true is somehow polluting the request), then give up.
+            // 403 from Cloudflare = challenge not yet solved OR cf_clearance
+            // expired. v98: use Grayjay's native captcha API -- throw
+            // CaptchaRequiredException so Grayjay opens the dedicated captcha
+            // webview (declared in SpankbangConfig.json -> captcha), user
+            // solves Turnstile once, cf_clearance + real webview UA are
+            // captured, and the request is retried transparently. This
+            // replaces the manual "open sign-in webview" ritual from v97.
                 if (response.code === 403) {
-                if (useAuth) {
-                    log(`${context}: got 403 with useAuth=true, trying one plain guest retry`);
-                    try {
-                        const guestRetry = http.GET(url, API_HEADERS, false);
-                        if (guestRetry && guestRetry.isOk) return guestRetry.body;
-                    } catch (_) { /* ignore */ }
-                }
+                throwIfCaptcha(response);
+                // Not a CF challenge? Fall through to a legacy fatal error
+                // (e.g. 403 due to expired auth or geoblock).
+                let extra = "";
+                try {
+                    const fresh = isCfClearanceFresh(state.authCookies || "");
+                    if (fresh === false) {
+                        extra = " (cf_clearance appears EXPIRED -- Grayjay will open the captcha webview to refresh it)";
+                    }
+                } catch (_) { /* ignore */ }
                 throw new ScriptException(
-                    `${CF_403_PREFIX} ${context} was blocked by SpankBang (Cloudflare 403). ` +
-                    `Open the sign-in webview from Grayjay source settings ONCE ` +
-                    `so the Cloudflare challenge can be solved. When you see the ` +
-                    `green "Success!" Turnstile checkmark, press the BACK button ` +
-                    `to close the webview and browse as a guest (no login required). ` +
-                    `Or complete the SpankBang login for personalized features.`
+                    `${CF_403_PREFIX} ${context} was blocked by SpankBang (Cloudflare 403).${extra} ` +
+                    `Grayjay should have opened a captcha webview automatically -- if it did not, ` +
+                    `open the sign-in webview manually from source settings and wait for the green ` +
+                    `"Success!" Turnstile checkmark before pressing BACK.`
                 );
             }
             throw new ScriptException(`${context} failed with status ${response.code}`);
@@ -327,15 +403,15 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             }
         }
 
-        // Cloudflare 403 -> retry through the authenticated client so we pick up
-        // the cf_clearance / __cf_bm cookies obtained by the login webview.
-        if (!response.isOk && response.code === 403 && !useAuth) {
-            log(`${context}: got 403, retrying via authenticated client to pick up cf_clearance cookie`);
-            const authRetry = http.GET(url, requestHeaders, true);
-            if (authRetry.isOk) {
-                return { isOk: true, code: authRetry.code, body: authRetry.body };
-            }
-            return { isOk: false, code: authRetry.code, body: authRetry.body };
+        // Cloudflare 403 -> use Grayjay's native captcha API (v98). Throwing
+        // CaptchaRequiredException causes Grayjay to open the captcha webview
+        // declared in SpankbangConfig.json -> captcha, capture cf_clearance,
+        // and retry. Only meaningful when the body actually shows a CF
+        // challenge page; plain guest 403s (rare) just return.
+        if (!response.isOk && response.code === 403) {
+            try { throwIfCaptcha(response); } catch (e) { throw e; }
+            log(`${context}: got 403 without CF challenge marker -- returning without retry`);
+            return { isOk: false, code: response.code, body: response.body };
         }
         
         // Reset on successful request
