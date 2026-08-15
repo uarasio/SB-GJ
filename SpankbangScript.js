@@ -4533,98 +4533,111 @@ source.getCapabilities = function() {
 };
 
 source.enable = function(conf, settings, savedStateStr) {
-    config = conf ?? {};
-    
-    log("===== PLUGIN ENABLE CALLED =====");
-    
-    if (settings) {
-        log("enable: Received settings object");
-        if (typeof settings.syncRemoteHistory !== 'undefined') {
-            log("enable: syncRemoteHistory setting found, value=" + settings.syncRemoteHistory);
-            if (typeof settings.syncRemoteHistory === 'boolean') {
-                pluginSettings.syncRemoteHistory = settings.syncRemoteHistory;
-            } else if (typeof settings.syncRemoteHistory === 'string') {
-                pluginSettings.syncRemoteHistory = settings.syncRemoteHistory.toLowerCase() === 'true';
-            } else {
-                pluginSettings.syncRemoteHistory = !!settings.syncRemoteHistory;
-            }
-            log("enable: syncRemoteHistory is now " + (pluginSettings.syncRemoteHistory ? "ENABLED" : "DISABLED"));
-            log("enable: hasSyncRemoteWatchHistory capability = " + pluginSettings.syncRemoteHistory);
-        } else {
-            log("enable: syncRemoteHistory setting NOT found in settings object");
-        }
-    } else {
-        log("enable: No settings object provided");
-    }
-    
-    if (!localConfig.pornstarShortIds) {
-        localConfig.pornstarShortIds = {};
-    }
-
-    if (savedStateStr) {
-        try {
-            const savedState = JSON.parse(savedStateStr);
-            state.sessionCookie = savedState.sessionCookie || "";
-            state.isAuthenticated = savedState.isAuthenticated || false;
-            state.authCookies = savedState.authCookies || "";
-            state.username = savedState.username || "";
-            state.userId = savedState.userId || "";
-            
-            if (savedState.pornstarShortIds) {
-                localConfig.pornstarShortIds = savedState.pornstarShortIds;
-            }
-            
-            log("State loaded: authenticated=" + state.isAuthenticated + ", username=" + state.username);
-        } catch (e) {
-            log("Failed to parse saved state: " + e);
-        }
-    }
-    
-    if (typeof bridge !== 'undefined' && bridge.isLoggedIn && bridge.isLoggedIn()) {
-        loadAuthCookies();
-        state.isAuthenticated = true;
-        
-        if (!state.username || state.username.length === 0) {
-            try {
-                fetchUserInfo();
-            } catch (e) {
-                log("Could not fetch user info on enable: " + e);
-            }
-        }
-    }
-};
-    // v101 CF-HARDENING PATCH: proactive Cloudflare bootstrap.
-    // If we don't already have a fresh cf_clearance cookie, throw ONE
-    // CaptchaRequiredException pointed at /trending_videos/1/ (a high-cache
-    // page that reliably hits CF but never redirects). Grayjay opens the
-    // captcha webview, user solves Turnstile, cookie lands in the jar, plugin
-    // is re-enabled with the fresh clearance -- and we then never bootstrap
-    // again this session (state.bootstrapDone). This eliminates the
-    // "first-request 403 -> webview -> retry -> 403" ping-pong.
+    // v102 FIX: enable() MUST NEVER throw. The v101 "proactive Cloudflare
+    // bootstrap" threw CaptchaRequiredException from enable() when no fresh
+    // cf_clearance cookie was present -- but Grayjay's captcha webview is
+    // only reliably wired to runtime HTTP calls (home / search / detail), not
+    // to enable(). Result: install failed with "Failed to install due to
+    // SpankBang Captcha Required." The fix is to defer captcha resolution to
+    // the first real request, matching pre-v101 behavior. The bootstrap block
+    // that used to live below source.enable (dangling at module scope in
+    // v101, which made it fire at script-load time and broke install
+    // outright) has been deleted entirely.
+    //
+    // Everything below is wrapped in a top-level try/catch so ANY unexpected
+    // failure -- saved-state parse, cookie load, session validation -- is
+    // logged and swallowed. enable() always returns cleanly so install
+    // completes.
     try {
-        if (!state.bootstrapDone && typeof CaptchaRequiredException !== 'undefined') {
-            try { loadAuthCookies(); } catch (_) { /* ignore */ }
-            const fresh = isCfClearanceFresh(state.authCookies || "");
-            if (fresh !== true) {
-                state.bootstrapDone = true;
-                state.captchaAttempts = (state.captchaAttempts | 0) + 1;
-                log("[SB] bootstrap: no fresh cf_clearance -- throwing CaptchaRequiredException once");
-                throw new CaptchaRequiredException(
-                    BASE_URL + "/trending_videos/1/",
-                    "SpankBang needs a Cloudflare clearance before any request can succeed."
-                );
+        config = conf ?? {};
+        log("===== PLUGIN ENABLE CALLED (v102) =====");
+
+        if (settings) {
+            log("enable: Received settings object");
+            if (typeof settings.syncRemoteHistory !== 'undefined') {
+                log("enable: syncRemoteHistory setting found, value=" + settings.syncRemoteHistory);
+                if (typeof settings.syncRemoteHistory === 'boolean') {
+                    pluginSettings.syncRemoteHistory = settings.syncRemoteHistory;
+                } else if (typeof settings.syncRemoteHistory === 'string') {
+                    pluginSettings.syncRemoteHistory = settings.syncRemoteHistory.toLowerCase() === 'true';
+                } else {
+                    pluginSettings.syncRemoteHistory = !!settings.syncRemoteHistory;
+                }
+                log("enable: syncRemoteHistory is now " + (pluginSettings.syncRemoteHistory ? "ENABLED" : "DISABLED"));
+                log("enable: hasSyncRemoteWatchHistory capability = " + pluginSettings.syncRemoteHistory);
             } else {
-                state.bootstrapDone = true;
-                log("[SB] bootstrap: cf_clearance already fresh, skipping pre-emptive captcha");
+                log("enable: syncRemoteHistory setting NOT found in settings object");
+            }
+        } else {
+            log("enable: No settings object provided");
+        }
+
+        if (!localConfig.pornstarShortIds) {
+            localConfig.pornstarShortIds = {};
+        }
+
+        if (savedStateStr) {
+            try {
+                const savedState = JSON.parse(savedStateStr);
+                state.sessionCookie = savedState.sessionCookie || "";
+                state.isAuthenticated = savedState.isAuthenticated || false;
+                state.authCookies = savedState.authCookies || "";
+                state.username = savedState.username || "";
+                state.userId = savedState.userId || "";
+
+                if (savedState.pornstarShortIds) {
+                    localConfig.pornstarShortIds = savedState.pornstarShortIds;
+                }
+
+                log("State loaded: authenticated=" + state.isAuthenticated + ", username=" + state.username);
+            } catch (e) {
+                log("Failed to parse saved state (non-fatal): " + e);
+            }
+        }
+
+        // v102: reset the per-session captcha loop safeguard so the very
+        // first HTTP request after install/enable can open the captcha
+        // webview exactly once. Without this, a stale captchaSolvedOnce
+        // from a previous run could suppress the lazy captcha throw.
+        state.captchaAttempts = 0;
+        state.captchaSolvedOnce = false;
+        state.cfClearanceCheckedAt = 0;
+        state.cfClearanceFresh = false;
+        state.bootstrapDone = false;
+
+        if (typeof bridge !== 'undefined' && bridge.isLoggedIn && bridge.isLoggedIn()) {
+            try {
+                loadAuthCookies();
+                state.isAuthenticated = true;
+            } catch (e) {
+                // Cookie load failure MUST NOT abort enable. Mark
+                // unauthenticated and let the next real request re-drive
+                // the flow.
+                log("enable: loadAuthCookies failed (non-fatal): " + e);
+                state.isAuthenticated = false;
+            }
+
+            if (state.isAuthenticated && (!state.username || state.username.length === 0)) {
+                try {
+                    // validateSession/fetchUserInfo may hit Cloudflare and
+                    // throw CaptchaRequiredException. That is fine on a
+                    // runtime request but NOT from enable() -- swallow it
+                    // here and let the first real request re-drive the
+                    // captcha webview.
+                    fetchUserInfo();
+                } catch (e) {
+                    log("enable: fetchUserInfo failed (non-fatal, will re-drive on first request): " + e);
+                }
             }
         }
     } catch (e) {
-        // Re-throw CaptchaRequiredException so Grayjay can open the webview.
-        if (typeof CaptchaRequiredException !== 'undefined' && e instanceof CaptchaRequiredException) {
-            throw e;
-        }
-        log("[SB] bootstrap error (non-fatal): " + e);
+        // Absolute belt-and-braces catch. If anything above (including a
+        // rogue CaptchaRequiredException from a nested call) escapes, we
+        // swallow it here so install can complete. Captcha will re-trigger
+        // lazily on the first runtime HTTP call.
+        log("enable: unexpected error swallowed to preserve install (non-fatal): " + e);
     }
+};
 
 source.disable = function() {
     state.sessionCookie = "";

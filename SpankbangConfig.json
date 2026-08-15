@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 101,
+  "version": 102,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -76,6 +76,13 @@
   ],
   "primaryClaimFieldType": 3,
   "changelog": {
+    "102": [
+      "Fix install failure caused by proactive Cloudflare bootstrap in enable(). Captcha challenges now resolve lazily on first request, matching pre-v101 behavior.",
+      "Removed the dangling module-scope bootstrap block that fired CaptchaRequiredException at script-load time (root cause of the 'Failed to install due to SpankBang Captcha Required.' error).",
+      "source.enable() body wrapped in try/catch -- any saved-state parse, cookie-load, or session-validation failure is logged and swallowed so install always completes cleanly.",
+      "captchaSolvedOnce / bootstrapDone / cfClearanceCheckedAt / cfClearanceFresh / captchaAttempts are now reset inside enable() so the very first runtime request after install can still open the captcha webview.",
+      "No changes to allowUrls, captcha / captchaDesktop / authentication config, User-Agent logic, header set, or rate limiting -- v101's request-pipeline hardening is preserved untouched."
+    ],
     "98": [
       "MAJOR: Adopt Grayjay's native captcha resolution API (introduced in Patreon plugin v20). When any request hits a Cloudflare challenge the plugin now throws CaptchaRequiredException and Grayjay automatically opens a dedicated captcha webview -- user solves Turnstile once, cf_clearance is captured with the webview's REAL user-agent, and the request is retried transparently. No more 'open sign-in webview from source settings' rituals.",
       "captcha block added to config with cookiesToFind:['cf_clearance'] so the captcha webview auto-closes the moment Cloudflare passes.",
