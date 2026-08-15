@@ -90,8 +90,11 @@ const USER_AGENT_FALLBACK = IS_DESKTOP
 function getUserAgent() {
     try {
         if (typeof bridge !== 'undefined') {
-            if (bridge.authUserAgent) return bridge.authUserAgent;
+        // v100 PATCH #3: Prefer captchaUserAgent over authUserAgent. cf_clearance
+        // is bound to the exact UA that solved the Turnstile challenge; using
+        // authUserAgent first can invalidate the clearance on the next request.
             if (bridge.captchaUserAgent) return bridge.captchaUserAgent;
+            if (bridge.authUserAgent) return bridge.authUserAgent;
         }
     } catch (_) { /* ignore */ }
     return USER_AGENT_FALLBACK;
@@ -153,17 +156,32 @@ function isCfClearanceFresh(cookieStr) {
 // cf_clearance to appear, then transparently retries the request with the
 // real webview UA now available via bridge.captchaUserAgent. This is the
 // same mechanism the Patreon plugin uses since v20.
-function throwIfCaptcha(resp) {
-    if (resp != null && resp.body != null && resp.code === 403) {
-        const body = resp.body.toLowerCase();
+// v100 PATCH #1 + #6: Fire on EVERY response (home / search / subs / video-details /
+// stream POST / suggestions), not just 403. Cloudflare sometimes returns 503 with a
+// challenge body, occasionally 200 with a JS-challenge. Match on body markers
+// regardless of status code.
+//
+// The `requestUrl` argument is CRITICAL: we pass it into CaptchaRequiredException so
+// Grayjay reopens the URL WE asked for. resp.url may point at /cdn-cgi/challenge... after
+// a CF challenge redirect, which is useless (the webview can't finish the challenge from
+// that URL, and even if it could, we'd never re-hit the original endpoint).
+function throwIfCaptcha(resp, requestUrl) {
+    if (resp != null && resp.body != null) {
+        const bodyStr = typeof resp.body === 'string' ? resp.body : String(resp.body);
+        const body = bodyStr.toLowerCase();
         if (body.indexOf('/cdn-cgi/challenge-platform') !== -1
             || body.indexOf('just a moment') !== -1
-            || body.indexOf('cf-mitigated') !== -1) {
-            // Last-chance cookie refresh from Grayjay's cookie jar (auth            
-            // webview or previous captcha webview may have populated it).           
+            || body.indexOf('cf-mitigated') !== -1
+            || body.indexOf('cf_chl_opt') !== -1
+            || body.indexOf('__cf_chl_') !== -1) {
+            // Last-chance cookie refresh from Grayjay's cookie jar (auth webview or
+            // previous captcha webview may have populated it).              
             try { if (typeof loadAuthCookies === 'function') loadAuthCookies(); } catch (_) { /* ignore */ }
             if (typeof CaptchaRequiredException !== 'undefined') {
-                throw new CaptchaRequiredException(resp.url, resp.body);
+                // Use the caller-supplied requestUrl; fall back to resp.url only if the
+                // caller didn't pass one (legacy call sites).
+                const urlForWebview = requestUrl || resp.url;
+                throw new CaptchaRequiredException(urlForWebview, bodyStr);   
             }
         }
     }
@@ -238,6 +256,11 @@ const REGEX_PATTERNS = {
 
 function getAuthHeaders() {
     const headers = buildApiHeaders();
+    // v100 PATCH #2: Re-read cookies from the jar before EVERY outbound request.
+    // After Grayjay's captcha webview closes, a fresh cf_clearance lives in the
+    // cookie jar -- we must grab it here, not rely on state.authCookies cached at
+    // plugin init. loadAuthCookies() updates state.authCookies in place.
+    try { loadAuthCookies(); } catch (_) { /* ignore */ }
     if (state.authCookies && state.authCookies.length > 0) {
         headers["Cookie"] = state.authCookies;
     }
@@ -316,6 +339,13 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
         
         const requestHeaders = headers || getAuthHeaders();
         const response = http.GET(url, requestHeaders, useAuth);
+
+        // v100 PATCH #1: Uniform captcha detection. Fire BEFORE any status-based
+        // branching -- CF 503 / 429 / 200-with-challenge would otherwise bypass this
+        // and turn into a ScriptException instead of a CaptchaRequiredException.
+        // Pass the request URL so Grayjay's captcha webview reopens the right page.
+        throwIfCaptcha(response, url);
+
         if (!response.isOk) {
             // If we get 429, add exponential backoff with multiple retries
             if (response.code === 429) {
@@ -328,6 +358,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
                 // Retry up to 3 times
                 if (localConfig.consecutiveErrors < 3) {
                     const retryResponse = http.GET(url, requestHeaders, useAuth);
+                    throwIfCaptcha(retryResponse, url);
                     if (retryResponse.isOk) {
                         localConfig.consecutiveErrors = 0; // Reset on success
                         localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8); // Slowly decrease
@@ -335,17 +366,10 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
                     }
                 }
             }
-            // 403 from Cloudflare = challenge not yet solved OR cf_clearance
-            // expired. v98: use Grayjay's native captcha API -- throw
-            // CaptchaRequiredException so Grayjay opens the dedicated captcha
-            // webview (declared in SpankbangConfig.json -> captcha), user
-            // solves Turnstile once, cf_clearance + real webview UA are
-            // captured, and the request is retried transparently. This
-            // replaces the manual "open sign-in webview" ritual from v97.
-                if (response.code === 403) {
-                throwIfCaptcha(response);
-                // Not a CF challenge? Fall through to a legacy fatal error
-                // (e.g. 403 due to expired auth or geoblock).
+            // 403 without a CF challenge marker (throwIfCaptcha above already handled
+            // real CF challenges). Fall through to a legacy fatal error (e.g. 403 due
+            // to expired auth or geoblock).
+            if (response.code === 403) {
                 let extra = "";
                 try {
                     const fresh = isCfClearanceFresh(state.authCookies || "");
@@ -371,6 +395,16 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
         
         return response.body;
     } catch (error) {
+        // v100: preserve CaptchaRequiredException (and any other framework exception
+        // whose name/constructor isn't ScriptException) so Grayjay's captcha handler
+        // actually sees it. Wrapping it in ScriptException here was silently swallowing
+        // captchas for every path except the one that used makeRequestNoThrow.
+        if (typeof CaptchaRequiredException !== 'undefined' && error instanceof CaptchaRequiredException) {
+            throw error;
+        }
+        if (error instanceof ScriptException) {
+            throw error;
+        }
         throw new ScriptException(`Failed to fetch ${context}: ${error.message}`);
     }
 }
@@ -383,6 +417,11 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         const requestHeaders = headers || getAuthHeaders();
         const response = http.GET(url, requestHeaders, useAuth);
         
+        // v100 PATCH #1: Uniform captcha detection -- fire on EVERY response with the
+        // request URL (not resp.url) so Grayjay's captcha webview reopens the right
+        // page even if CF redirected to /cdn-cgi/challenge... first.
+        throwIfCaptcha(response, url);
+        
         // If we get 429, add exponential backoff and retry
         if (!response.isOk && response.code === 429) {
             localConfig.consecutiveErrors++;
@@ -394,6 +433,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             // Retry up to 3 times
             if (localConfig.consecutiveErrors < 3) {
                 const retryResponse = http.GET(url, requestHeaders, useAuth);
+                throwIfCaptcha(retryResponse, url);
                 if (retryResponse.isOk) {
                     localConfig.consecutiveErrors = 0;
                     localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.8);
@@ -402,13 +442,9 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             }
         }
 
-        // Cloudflare 403 -> use Grayjay's native captcha API (v98). Throwing
-        // CaptchaRequiredException causes Grayjay to open the captcha webview
-        // declared in SpankbangConfig.json -> captcha, capture cf_clearance,
-        // and retry. Only meaningful when the body actually shows a CF
-        // challenge page; plain guest 403s (rare) just return.
+        // 403 without a CF challenge marker: return the error to the caller so it can
+        // decide (guest paths, geoblocks). Real CF challenges were already thrown above.
         if (!response.isOk && response.code === 403) {
-            try { throwIfCaptcha(response); } catch (e) { throw e; }
             log(`${context}: got 403 without CF challenge marker -- returning without retry`);
             return { isOk: false, code: response.code, body: response.body };
         }
@@ -423,6 +459,12 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         
         return { isOk: response.isOk, code: response.code, body: response.body };
     } catch (error) {
+        // v100: CaptchaRequiredException MUST escape this "NoThrow" wrapper -- otherwise
+        // Grayjay never sees it and never opens the captcha webview. The "NoThrow"
+        // contract only covers ordinary HTTP failures.
+        if (typeof CaptchaRequiredException !== 'undefined' && error instanceof CaptchaRequiredException) {
+            throw error;
+        }
         return { isOk: false, code: 0, body: null, error: error.message };
     }
 }
@@ -4045,14 +4087,12 @@ function fetchCommentsFromApi(videoId) {
 function hasValidAuthCookie(cookies) {
     if (!cookies) return false;
 
-    // v95: confirmed against a live logged-in SpankBang cookie jar. The two
-    // cookies that only appear AFTER a successful sign-in are `sb_session`
-    // (the HTTPOnly session) and `auth` (remember-me, encodes userid:username).
-    // Everything else in the list is kept as a defensive fallback.
-    const validCookieNames = [
-        'sb_session', 'auth', 'sessionid', 'session_id', 'sb_user_id', 'sb_uid',
-        'user_id', 'logged_in', 'remember_token', 'session_token'
-    ];
+    // v100: aligned with the config's trimmed cookiesToFind=["sb_session"]. The old
+    // list included cookies like PHPSESSID / logged_in / user_id that SpankBang sets
+    // pre-login, causing false positives (plugin thought guest sessions were signed
+    // in). sb_session and `auth` are the only two cookies that appear EXCLUSIVELY
+    // after a real sign-in.
+    const validCookieNames = ['sb_session', 'auth'];
 
     if (typeof cookies === 'string') {
         if (cookies.length === 0) return false;
@@ -4419,18 +4459,18 @@ source.isLoggedIn = function() {
 };
 
 source.login = function(code) {
+    // v100 PATCH #4: Login-flow simplification. Drop the fragile validateSession()
+    // HTML-scan at login completion -- trust the presence of sb_session that
+    // Grayjay's webview handed back (the config's cookiesToFind = ["sb_session"]
+    // guarantees Grayjay only closes the webview once the cookie is actually
+    // present). validateSession() still runs lazily below when Subs / History is
+    // opened, where a stale-session false-positive here would cost us nothing.
     try {
         loadAuthCookies();
-        state.isAuthenticated = true;
-        log("Login triggered - authentication cookies captured");
-        
-        if (validateSession()) {
-            log("Login successful - session validated");
-            return true;
-        } else {
-            log("Login may have issues - session validation uncertain");
-            return true;
-        }
+        const hasSession = hasValidAuthCookie(state.authCookies);
+        state.isAuthenticated = hasSession;
+        log("source.login: sb_session present = " + hasSession + " (skipping HTML-scan validateSession per v100 patch)");
+        return hasSession;
     } catch (e) {
         log("Login failed: " + e);
         return false;
@@ -4477,13 +4517,39 @@ source.prepareLogin = function() {
         state.sessionCookie = "";
         state.isAuthenticated = false;
         state.authCookies = "";
+        // v100 PATCH #5: prepareLogin() MUST wipe cf_clearance too. A stale
+        // cf_clearance was blocking the login webview from re-running Turnstile
+        // (Grayjay's webview never re-triggered the challenge because CF still
+        // trusted the old cookie, then rejected the actual login POST because
+        // the clearance was scoped to a different UA/IP/fingerprint).
         clearSpankBangCookies();
+        // Belt-and-braces: name-scoped delete for cf_clearance / sb_session in
+        // case clearSpankBangCookies() is a no-op on this Grayjay build.
+        clearCookieByName("cf_clearance");
+        clearCookieByName("sb_session");
         return true;
     } catch (e) {
         log("prepareLogin error: " + e);
         return false;
     }
 };
+
+// Best-effort delete of a single named cookie across every API surface Grayjay
+// exposes. No-op on builds that don't expose per-name deletion.
+function clearCookieByName(name) {
+    try {
+        if (typeof http !== 'undefined' && typeof http.setCookie === 'function') {
+            try { http.setCookie(BASE_URL, name, "", { expires: 0 }); } catch (_) { /* ignore */ }
+        }
+        if (typeof bridge !== 'undefined' && typeof bridge.clearCookies === 'function') {
+            try { bridge.clearCookies("spankbang.com", [name]); } catch (_) { /* ignore */ }
+            try { bridge.clearCookies("www.spankbang.com", [name]); } catch (_) { /* ignore */ }
+        }
+        log("clearCookieByName(" + name + "): attempted");
+    } catch (e) {
+        log("clearCookieByName(" + name + ") error: " + e);
+    }
+}
 
 function parseSubscriptionsPage(html) {
     const subscriptions = [];
