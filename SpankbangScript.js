@@ -159,10 +159,9 @@ function throwIfCaptcha(resp) {
         if (body.indexOf('/cdn-cgi/challenge-platform') !== -1
             || body.indexOf('just a moment') !== -1
             || body.indexOf('cf-mitigated') !== -1) {
-            // CaptchaRequiredException is provided by Grayjay's runtime. Guard
-            // against older Grayjay builds that don't expose it: fall back to
-            // a plain ScriptException with the CF sentinel so the caller still
-            // renders the "solve captcha" message.
+            // Last-chance cookie refresh from Grayjay's cookie jar (auth            
+            // webview or previous captcha webview may have populated it).           
+            try { if (typeof loadAuthCookies === 'function') loadAuthCookies(); } catch (_) { /* ignore */ }
             if (typeof CaptchaRequiredException !== 'undefined') {
                 throw new CaptchaRequiredException(resp.url, resp.body);
             }
