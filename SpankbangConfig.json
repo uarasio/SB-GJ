@@ -34,7 +34,6 @@
     ".challenges.cloudflare.com",
     ".cloudflare.com",
     "static.cloudflareinsights.com",
-    "cdnjs.cloudflare.com",
     ".cloudflareinsights.com",
     "www.google.com",
     "www.gstatic.com",
@@ -50,24 +49,25 @@
       "userAgent": null,
       "loginUrl": "https://spankbang.com/users/login",
       "cookiesToFind": [
-        "sb_session"    
+        "sb_session"
       ],
-    "cookiesExclOthers": false,    
-      "useMobileEmulation": false 
-    },
-    "captcha": {
+      "cookiesExclOthers": false,
+      "useMobileEmulation": false
+    }
+  },
+  "captcha": {
     "userAgent": null,
-    "captchaUrl": "null",
+    "captchaUrl": null,
     "cookiesToFind": [
       "cf_clearance"
     ]
   },
-  "captchaDesktop": {   
-    "captchaUrl": null,    
-    "cookiesToFind": [      
-      "cf_clearance"   
-    ],    
-    "useMobileEmulation": false  
+  "captchaDesktop": {
+    "captchaUrl": null,
+    "cookiesToFind": [
+      "cf_clearance"
+    ],
+    "useMobileEmulation": false
   },
   "captchaConfig": null,
   "subscriptionRateLimit": 150,
