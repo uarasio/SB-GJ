@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 98,
+  "version": 99,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -43,7 +43,7 @@
   "authentication": {
     "userAgent": null,
     "loginUrl": "https://spankbang.com/users/login",
-    "completionUrl": "https://spankbang.com/",
+    "completionUrl": "https?://www\\.)?spankbang\\.com/(dashboard|users|profile|settings|home|$)",
     "cookiesToFind": [
       "sb_session",
       "auth",
@@ -54,13 +54,17 @@
       "user_id",
       "logged_in",
       "remember_token",
-      "session_token"
+      "session_token",
+      "sb_uid_ss",
+      "sb_lgd",
+      "PHPSESSID",
+      "wp_user"
     ],
     "cookiesExclOthers": false
   },
   "captcha": {
     "userAgent": null,
-    "captchaUrl": null,
+    "captchaUrl": "https//spankbang.com/",
     "cookiesToFind": [
       "cf_clearance"
     ]
