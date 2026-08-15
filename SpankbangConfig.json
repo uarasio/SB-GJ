@@ -43,31 +43,33 @@
   "authentication": {
     "userAgent": null,
     "loginUrl": "https://spankbang.com/users/login",
-    "completionUrl": "https?://www\\.)?spankbang\\.com/(dashboard|users|profile|settings|home|$)",
     "cookiesToFind": [
       "sb_session",
-      "auth",
-      "sessionid",
-      "session_id",
-      "sb_user_id",
-      "sb_uid",
-      "user_id",
-      "logged_in",
-      "remember_token",
-      "session_token",
-      "sb_uid_ss",
-      "sb_lgd",
-      "PHPSESSID",
-      "wp_user"
     ],
+    "authenticationDesktop": {
+      "userAgent": null,
+      "loginUrl": "https://spankbang.com/users/login",
+      "cookiesToFind": [
+        "sb_session"    
+      ],
+    "cookiesExclOthers": false,    
+      "useMobileEmulation": false 
+    },
     "cookiesExclOthers": false
   },
   "captcha": {
     "userAgent": null,
-    "captchaUrl": "https//spankbang.com/",
+    "captchaUrl": "null",
     "cookiesToFind": [
       "cf_clearance"
     ]
+  },
+  "captchaDesktop": {   
+    "captchaUrl": null,    
+    "cookiesToFind": [      
+      "cf_clearance"   
+    ],    
+    "useMobileEmulation": false  
   },
   "captchaConfig": null,
   "subscriptionRateLimit": 150,
