@@ -1,13 +1,33 @@
-const BASE_URL = "https://spankbang.com";
+// v101 CF-HARDENING PATCH:
+// BASE_URL is now the canonical www host. Cloudflare's edge rules for
+// spankbang.com apex vs www.spankbang.com are slightly different and cookies
+// scoped to only "spankbang.com" (no leading dot) do NOT get sent to
+// "www.spankbang.com" by every HTTP client. Using www everywhere -- and
+// scoping the cookie jar to ".spankbang.com" (leading dot) -- guarantees a
+// consistent host + cookie set on every request.
+const BASE_URL = "https://www.spankbang.com";
+const BASE_HOST = "https://www.spankbang.com"; // alias used in headers
 const PLATFORM = "SpankBang";
 const PLATFORM_CLAIMTYPE = 3;
 
+
+// v101 CF-HARDENING PATCH: Toggle to emit a single-line
+//   [SB] path=... cf=... ua=... status=...
+// log per request. Disabled by default -- flip to true to diagnose 403s from
+// Grayjay's log viewer without patching the plugin.
+const DEBUG_LOG = false;
+
+// v101 CF-HARDENING PATCH: How long we trust a cf_clearance cookie before
+// re-checking freshness against the current wall-clock. Cloudflare's default
+// clearance TTL is 30 min; we use 25 min to leave headroom.
+const CF_CLEARANCE_FRESH_MS = 25 * 60 * 1000;
+
 const USER_URLS = {
-    PLAYLISTS: "https://spankbang.com/users/playlists",
-    HISTORY: "https://spankbang.com/users/history",
-    SUBSCRIPTIONS: "https://spankbang.com/users/subscriptions",
-    FAVORITES: "https://spankbang.com/users/favorites",
-    PROFILE: "https://spankbang.com/users/profile"
+    PLAYLISTS: "https://www.spankbang.com/users/playlists",
+    HISTORY: "https://www.spankbang.com/users/history",
+    SUBSCRIPTIONS: "https://www.spankbang.com/users/subscriptions",
+    FAVORITES: "https://www.spankbang.com/users/favorites",
+    PROFILE: "https://www.spankbang.com/users/profile"
 };
 
 var config = {};
@@ -22,7 +42,25 @@ var state = {
     isAuthenticated: false,
     authCookies: "",
     username: "",
-    userId: ""
+    userId: "",
+    // v101 CF-HARDENING PATCH: per-session captcha book-keeping to kill the
+    // infinite CaptchaRequiredException loop.
+    //   captchaAttempts       -- how many times we've thrown this session
+    //   captchaSolvedOnce     -- did we ever end up with a cf_clearance after
+    //                            a throw? once true, subsequent 403s bubble
+    //                            up as regular ScriptExceptions instead of
+    //                            reopening the webview.
+    //   cfClearanceCheckedAt  -- unix ms of last freshness check (cached for
+    //                            CF_CLEARANCE_FRESH_MS to avoid recomputing
+    //                            on every request).
+    //   cfClearanceFresh      -- cached boolean result of the last check.
+    //   bootstrapDone         -- did source.enable() already fire its one
+    //                            allowed pre-emptive CaptchaRequiredException?
+    captchaAttempts: 0,
+    captchaSolvedOnce: false,
+    cfClearanceCheckedAt: 0,
+    cfClearanceFresh: false,
+    bootstrapDone: false
 };
 
 const CONFIG = {
@@ -39,8 +77,8 @@ const CONFIG = {
         "4k": { name: "4K", width: 3840, height: 2160 }
     },
     INTERNAL_URL_SCHEME: "spankbang://profile/",
-    EXTERNAL_URL_BASE: "https://spankbang.com",
-    PORNSTAR_IMG_BASE: "https://spankbang.com/pornstarimg/f/",
+    EXTERNAL_URL_BASE: "https://www.spankbang.com",
+    PORNSTAR_IMG_BASE: "https://www.spankbang.com/pornstarimg/f/",
     SEARCH_FILTERS: {
         DURATION: {
             ANY: "",
@@ -73,53 +111,64 @@ const CONFIG = {
     }
 };
 
-// NOTE (v98): The User-Agent is now dynamic. We prefer whatever UA Grayjay's
-// webview actually used to solve authentication or the Cloudflare captcha
-// (via bridge.authUserAgent / bridge.captchaUserAgent). Only if neither is
-// available do we fall back to a hardcoded UA -- and that fallback is
-// platform-aware (Android on the mobile app, Windows on the desktop app),
-// matching the pattern the Patreon plugin adopted in v25.
+// v101 CF-HARDENING PATCH:
+// Old behaviour: we ALWAYS injected a hardcoded Chrome fallback UA when
+// bridge.captchaUserAgent / bridge.authUserAgent were absent. Cloudflare's
+// bot heuristics flag that as a mismatched fingerprint (the JA3/TLS
+// signature doesn't line up with the claimed Chrome UA), producing 403s
+// on every content request until the user solved another captcha -- which
+// then also 403'd once the freshly-issued cf_clearance was hit with our
+// fake UA.
 //
-// Cloudflare binds cf_clearance / __cf_bm to the exact UA that solved the
-// challenge, so this dynamic strategy is what guarantees a fingerprint match
-// on every subsequent request.
+// New behaviour: return null when no webview UA is available. buildApiHeaders()
+// then OMITS the User-Agent header entirely, letting Grayjay's native HTTP
+// client send its real UA (which matches its real TLS fingerprint). Only when
+// Grayjay's captcha webview has actually solved a challenge and exposed
+// bridge.captchaUserAgent do we override the UA -- that is the exact UA that
+// cf_clearance was bound to, so it MUST be reused verbatim on subsequent
+// requests or CF will invalidate the clearance.
 const IS_DESKTOP = (typeof bridge !== 'undefined' && bridge.buildPlatform === "desktop");
-const USER_AGENT_FALLBACK = IS_DESKTOP
-    ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Safari/537.36"
-    : "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.200 Mobile Safari/537.36";
+
 function getUserAgent() {
     try {
         if (typeof bridge !== 'undefined') {
-        // v100 PATCH #3: Prefer captchaUserAgent over authUserAgent. cf_clearance
-        // is bound to the exact UA that solved the Turnstile challenge; using
-        // authUserAgent first can invalidate the clearance on the next request.
+            // Prefer captchaUserAgent (bound to cf_clearance) over authUserAgent.
             if (bridge.captchaUserAgent) return bridge.captchaUserAgent;
             if (bridge.authUserAgent) return bridge.authUserAgent;
         }
     } catch (_) { /* ignore */ }
-    return USER_AGENT_FALLBACK;
+    return null; // <-- v101 change: no hardcoded fallback UA
 }
 
-// API_HEADERS is now a factory (call buildApiHeaders()) rather than a static
-// object, because the UA can change between requests once Grayjay's captcha
-// webview solves Cloudflare and exposes bridge.captchaUserAgent. Everything
-// that used to read API_HEADERS["User-Agent"] should now call getUserAgent().
+// v101 CF-HARDENING PATCH: minimal, browser-plausible header set for main-site
+// (spankbang.com) requests. What we DO send:
+//   - Referer   : same-origin so CF's "external referer" rules pass
+//   - Origin    : matches Referer host, required for POST endpoints
+//   - Accept    : realistic HTML/JSON accept string
+//   - Accept-Language : en-US,en (kept because user is in the US)
+//   - Cookie    : full spankbang.com jar (session + CF cookies)
+//   - User-Agent: ONLY if bridge.captchaUserAgent is present (see getUserAgent)
+// What we deliberately DO NOT send anymore:
+//   - sec-ch-ua / sec-ch-ua-mobile / sec-ch-ua-platform (client hints)
+//   - sec-fetch-* (sec-fetch-dest / mode / site)
+//   - Accept-Encoding    (let the HTTP client negotiate)
+//   - Cache-Control / Pragma (bot-heuristic noise)
+//   - upgrade-insecure-requests
+//   - hardcoded fallback User-Agent
+// Every one of those was previously fingerprint-mismatched vs Grayjay's real
+// TLS handshake and triggering CF 403s on home/trending/search/subs.
 function buildApiHeaders() {
-    const ua = getUserAgent();
-    const isMobileUa = /Mobile|Android/i.test(ua);
-    return {
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9",
-        "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
-        "sec-ch-ua-mobile": isMobileUa ? "?1" : "?0",
-        "sec-ch-ua-platform": isMobileUa ? "\"Android\"" : "\"Windows\"",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "upgrade-insecure-requests": "1",
-        "Referer": "https://spankbang.com/"
+   const headers = {
+       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+       "Accept-Language": "en-US,en;q=0.9",
+       "Origin": BASE_HOST,
+       "Referer": BASE_HOST + "/"
     };
+    const ua = getUserAgent();
+    if (ua) {
+        headers["User-Agent"] = ua;
+    }
+    return headers;
 }
 // Backwards-compat shim: any code still doing API_HEADERS["User-Agent"] or
 // spreading {...API_HEADERS} will get a live snapshot. This is a plain object
@@ -127,20 +176,36 @@ function buildApiHeaders() {
 // throughout the file is safe because we rebuild it just-in-time in makeRequest.
 const API_HEADERS = buildApiHeaders();
 
-// Detect an expired cf_clearance cookie without hitting the server. cf_clearance
-// embeds a unix timestamp; if it's older than ~25 min we know it's expired and
-// tell the user instead of looping 403s forever.
+// v101 CF-HARDENING PATCH:
+// cf_clearance embeds a unix timestamp segment (dash-separated). If it's
+// older than CF_CLEARANCE_FRESH_MS we treat it as expired and stop looping
+// through the captcha webview. Result is cached in state so we don't
+// re-decode the cookie on every single request.
+//
+// Returns: true  = fresh (younger than CF_CLEARANCE_FRESH_MS)
+//          false = stale / expired
+//          null  = cookie missing OR unable to parse a timestamp
 function isCfClearanceFresh(cookieStr) {
     try {
+        const nowMs = Date.now();
+        if (state.cfClearanceCheckedAt && (nowMs - state.cfClearanceCheckedAt) < CF_CLEARANCE_FRESH_MS) {
+            return state.cfClearanceFresh;
+        }
         const m = (cookieStr || "").match(/(?:^|;\s*)cf_clearance=([^;]+)/);
-        if (!m) return null;
-        const now = Math.floor(Date.now() / 1000);
+        if (!m) {
+            state.cfClearanceCheckedAt = nowMs;
+            state.cfClearanceFresh = false;
+            return null;
+        }
+        const nowS = Math.floor(nowMs / 1000);
         const parts = m[1].split("-");
         for (const p of parts) {
             const n = parseInt(p, 10);
             if (!isNaN(n) && n > 1_400_000_000 && n < 2_100_000_000) {
-                if ((now - n) > 25 * 60) return false;
-                return true;
+                const fresh = (nowS - n) <= (CF_CLEARANCE_FRESH_MS / 1000);
+                state.cfClearanceCheckedAt = nowMs;
+                state.cfClearanceFresh = fresh;
+                return fresh;
             }
         }
         return null;
@@ -149,43 +214,68 @@ function isCfClearanceFresh(cookieStr) {
     }
 }
 
-// Cloudflare challenge detection + Grayjay native captcha trigger. On any 403
-// whose body carries the CF challenge platform marker, we throw
-// CaptchaRequiredException -- Grayjay INTERCEPTS this exception, opens the
-// captcha webview declared in SpankbangConfig.json -> "captcha", waits for
-// cf_clearance to appear, then transparently retries the request with the
-// real webview UA now available via bridge.captchaUserAgent. This is the
-// same mechanism the Patreon plugin uses since v20.
-// v100 PATCH #1 + #6: Fire on EVERY response (home / search / subs / video-details /
-// stream POST / suggestions), not just 403. Cloudflare sometimes returns 503 with a
-// challenge body, occasionally 200 with a JS-challenge. Match on body markers
-// regardless of status code.
-//
-// The `requestUrl` argument is CRITICAL: we pass it into CaptchaRequiredException so
-// Grayjay reopens the URL WE asked for. resp.url may point at /cdn-cgi/challenge... after
-// a CF challenge redirect, which is useless (the webview can't finish the challenge from
-// that URL, and even if it could, we'd never re-hit the original endpoint).
+// v101 CF-HARDENING PATCH: tighter CF-challenge detection + loop safeguard.
+// Rules:
+//   1. Only throw CaptchaRequiredException when the body carries an actual CF
+//      challenge marker. A bare 403 with no CF markers is NEVER treated as a
+//      captcha (it will surface as a normal ScriptException upstream).
+//   2. If we already solved a captcha THIS session (state.captchaSolvedOnce
+//      set below by makeRequest on the first successful response after a
+//      throw), don't throw again -- the user just sees a normal error message
+//      instead of the infinite Turnstile-webview loop.
+//   3. Increment state.captchaAttempts on every throw so the caller can gate.
 function throwIfCaptcha(resp, requestUrl) {
     if (resp != null && resp.body != null) {
         const bodyStr = typeof resp.body === 'string' ? resp.body : String(resp.body);
         const body = bodyStr.toLowerCase();
-        if (body.indexOf('/cdn-cgi/challenge-platform') !== -1
+        const isChallenge =
+               body.indexOf('/cdn-cgi/challenge-platform') !== -1
             || body.indexOf('just a moment') !== -1
             || body.indexOf('cf-mitigated') !== -1
             || body.indexOf('cf_chl_opt') !== -1
-            || body.indexOf('__cf_chl_') !== -1) {
-            // Last-chance cookie refresh from Grayjay's cookie jar (auth webview or
-            // previous captcha webview may have populated it).              
+            || body.indexOf('__cf_chl_') !== -1;
+        if (!isChallenge) return true;
+
+        // Try one cheap cookie refresh from Grayjay's jar (auth or prior
+        // captcha webview may have populated it since our last call).             
             try { if (typeof loadAuthCookies === 'function') loadAuthCookies(); } catch (_) { /* ignore */ }
+            
+        // v101 loop safeguard: once we've been through Turnstile this session
+        // AND ended up with a cf_clearance, do NOT reopen the webview. Bubble
+        // up as a normal error so the user sees "SpankBang blocked this
+        // request" instead of an endless captcha.
+        if (state.captchaSolvedOnce && isCfClearanceFresh(state.authCookies || "") === true) {
+            throw new ScriptException(
+                `${CF_403_PREFIX} SpankBang blocked this request even though captcha was already ` +
+                `solved this session. This is usually a temporary Cloudflare geo/IP rate limit; ` +
+                `wait a minute and try again, or reload the plugin to force a fresh challenge.`
+            );
+        }
+
             if (typeof CaptchaRequiredException !== 'undefined') {
-                // Use the caller-supplied requestUrl; fall back to resp.url only if the
-                // caller didn't pass one (legacy call sites).
+                state.captchaAttempts = (state.captchaAttempts | 0) + 1;
                 const urlForWebview = requestUrl || resp.url;
                 throw new CaptchaRequiredException(urlForWebview, bodyStr);   
-            }
         }
     }
     return true;
+}
+
+// v101 CF-HARDENING PATCH: single-line request log gated by DEBUG_LOG.
+// Emits e.g. [SB] path=/trending_videos/1/ cf=fresh ua=set status=200
+function debugLogRequest(url, status) {
+    if (!DEBUG_LOG) return;
+    try {
+        const path = (url || "").replace(/^https?:\/\/[^/]+/, "") || "/";
+        const cookieStr = state.authCookies || "";
+        const cfFresh = isCfClearanceFresh(cookieStr);
+        const cfState = cookieStr.indexOf("cf_clearance") === -1
+            ? "missing"
+            : (cfFresh === false ? "expired" : (cfFresh === true ? "fresh" : "unknown"));
+        const uaState = (typeof bridge !== 'undefined' && (bridge.captchaUserAgent || bridge.authUserAgent))
+            ? "set" : "native";
+        log(`[SB] path=${path} cf=${cfState} ua=${uaState} status=${status}`);
+    } catch (_) { /* ignore */ }
 }
 
 // Sentinel prefix for Cloudflare 403 errors so top-level source.* handlers can
@@ -284,32 +374,87 @@ function getAllCookieString() {
     return state.authCookies || "";
 }
 
-// CRITICAL 403 FIX (v95): VideoUrlSource / HLSSource objects previously carried
-// NO request modifier, so Grayjay.Desktop played the raw CDN URL with none of
-// the User-Agent / Referer / Cookie a browser sends -> Cloudflare 403 on every
-// stream. Attaching getRequestModifier() flips HasRequestModifier true, which is
-// exactly what the desktop backend checks before injecting custom headers into
-// the proxied media request (DetailsController.DirectVideoUrlSource /
-// DirectAudioUrlSource). Requires "allowAllHttpHeaderAccess": true in the config
-// so Cookie / User-Agent / Referer are allowed to be set.
+// v101 CF-HARDENING PATCH: MEDIA REQUESTS (HLS + progressive MP4).
+// hls-uranus.sb-cd.com and every .sb-cd.com CDN host has its OWN Cloudflare
+// rules -- and they are strict on client-hint / sec-fetch mismatch.
+//
+// What the modifier now sends:
+//   Referer      : https://www.spankbang.com/   (same-origin as the page)
+//   Origin       : https://www.spankbang.com    (matches Referer host)
+//   Cookie       : full jar scoped to .sb-cd.com + .spankbang.com
+//   Accept       : */*                          (generic, browser-plausible)
+//
+// What it deliberately does NOT send (each one was triggering CDN 403s):
+//   User-Agent          -- let Grayjay's native UA + real TLS fingerprint pass
+//   sec-ch-ua / mobile / platform
+//   sec-fetch-dest / mode / site
+//   Accept-Encoding / Cache-Control / Pragma
+//   upgrade-insecure-requests
+//
+// __cf_bm for .sb-cd.com is captured separately from the main-site jar; the
+// cookie string we assemble here combines both so the CDN sees the exact
+// clearance token it issued.
 function buildMediaRequestModifier() {
     return {
         modifyRequest: function (url, headers) {
             headers = headers || {};
-            const live = buildApiHeaders();
-            headers["User-Agent"] = live["User-Agent"];
-            headers["Referer"] = "https://spankbang.com/";
-            headers["Accept-Language"] = live["Accept-Language"];
-            headers["sec-ch-ua"] = live["sec-ch-ua"];
-            headers["sec-ch-ua-mobile"] = live["sec-ch-ua-mobile"];
-            headers["sec-ch-ua-platform"] = live["sec-ch-ua-platform"];
-            const cookieStr = getAllCookieString();
+            headers["Referer"] = BASE_HOST + "/";
+            headers["Origin"] = BASE_HOST;
+            headers["Accept"] = "*/*";
+            const cookieStr = getMediaCookieString(url);
             if (cookieStr && cookieStr.length > 0) {
                 headers["Cookie"] = cookieStr;
             }
+            debugLogRequest(url, "media");
             return { url: url, headers: headers };
         }
     };
+}
+
+// v101 CF-HARDENING PATCH: assemble a combined cookie string for a media
+// request. .sb-cd.com and .spankbang.com maintain separate __cf_bm cookies;
+// we merge both jars (de-duped by cookie name, spankbang.com wins on collision
+// because that's where cf_clearance lives). Falls back to state.authCookies
+// on Grayjay builds that don't expose http.getCookies per-host.
+function getMediaCookieString(mediaUrl) {
+    try {
+        const merged = {};
+        const addFromHost = (host) => {
+            try {
+                if (typeof http !== 'undefined' && typeof http.getCookies === 'function') {
+                    const c = http.getCookies(host);
+                    const s = cookiesToString(c);
+                    if (s) {
+                        for (const kv of s.split(';')) {
+                            const eq = kv.indexOf('=');
+                            if (eq > 0) {
+                                const k = kv.slice(0, eq).trim();
+                                const v = kv.slice(eq + 1).trim();
+                                if (k && !(k in merged)) merged[k] = v;
+                            }
+                        }
+                    }
+                }
+            } catch (_) { /* ignore */ }
+        };
+        // spankbang.com jar first so cf_clearance / sb_session win on collision.
+        addFromHost("https://www.spankbang.com");
+        addFromHost("https://spankbang.com");
+        // Then whichever .sb-cd.com host the media URL points at.
+        try {
+            const hostMatch = (mediaUrl || "").match(/^https?:\/\/([^/]+)/);
+            if (hostMatch && hostMatch[1] && hostMatch[1].indexOf("sb-cd.com") !== -1) {
+                addFromHost("https://" + hostMatch[1]);
+            }
+        } catch (_) { /* ignore */ }
+        // Also the generic .sb-cd.com host in case the client stores wildcard cookies there.
+        addFromHost("https://sb-cd.com");
+        const merged_str = Object.keys(merged).map(k => `${k}=${merged[k]}`).join("; ");
+        if (merged_str.length > 0) return merged_str;
+    } catch (e) {
+        log("getMediaCookieString failed: " + e);
+    }
+    return state.authCookies || "";
 }
 
 function sleep(ms) {
@@ -337,8 +482,21 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
         // Enforce rate limiting before making the request
         enforceRateLimit();
         
-        const requestHeaders = headers || getAuthHeaders();
+        // v101 CF-HARDENING PATCH: always merge fresh cookies + captcha-UA
+        // into whatever headers the caller passed. Historically many call
+        // sites passed the module-load API_HEADERS snapshot directly, which
+        // meant NO Cookie header was ever sent for home / search / trending
+        // -> instant CF 403. We now start from getAuthHeaders() and let the
+        // caller override individual keys on top.
+        const base = getAuthHeaders();
+        const requestHeaders = headers ? Object.assign({}, base, headers) : base;
+        // Caller override might have provided a stale/missing Cookie -- always
+        // enforce the freshly-loaded one from state.
+        if (state.authCookies && state.authCookies.length > 0) {
+            requestHeaders["Cookie"] = state.authCookies;
+        }
         const response = http.GET(url, requestHeaders, useAuth);
+        debugLogRequest(url, response ? response.code : "?");
 
         // v100 PATCH #1: Uniform captcha detection. Fire BEFORE any status-based
         // branching -- CF 503 / 429 / 200-with-challenge would otherwise bypass this
@@ -392,6 +550,15 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
         if (localConfig.requestDelay > 500) {
             localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.9);
         }
+        // v101 CF-HARDENING PATCH: mark this session as "captcha solved" once we
+        // land a successful response AND actually have a cf_clearance cookie.
+        // This is what arms throwIfCaptcha's loop-safeguard on the next 403.
+        try {
+            if (!state.captchaSolvedOnce
+                && (state.authCookies || "").indexOf("cf_clearance") !== -1) {
+                state.captchaSolvedOnce = true;
+            }
+        } catch (_) { /* ignore */ }
         
         return response.body;
     } catch (error) {
@@ -416,6 +583,7 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
         
         const requestHeaders = headers || getAuthHeaders();
         const response = http.GET(url, requestHeaders, useAuth);
+        debugLogRequest(url, response ? response.code : "?");
         
         // v100 PATCH #1: Uniform captcha detection -- fire on EVERY response with the
         // request URL (not resp.url) so Grayjay's captcha webview reopens the right
@@ -455,6 +623,13 @@ function makeRequestNoThrow(url, headers = null, context = 'request', useAuth = 
             if (localConfig.requestDelay > 500) {
                 localConfig.requestDelay = Math.max(500, localConfig.requestDelay * 0.9);
             }
+            // v101 CF-HARDENING PATCH: same solved-once bookkeeping as makeRequest.
+            try {
+                if (!state.captchaSolvedOnce
+                    && (state.authCookies || "").indexOf("cf_clearance") !== -1) {
+                    state.captchaSolvedOnce = true;
+                }
+            } catch (_) { /* ignore */ }
         }
         
         return { isOk: response.isOk, code: response.code, body: response.body };
@@ -4170,17 +4345,49 @@ function loadAuthCookies() {
     // Fix: capture ALL cookies for spankbang.com whenever any are present;
     // only the RETURN value (true / false) still reflects "is there a valid
     // *session* cookie" (used by isLoggedIn()).
+    
+    // v101 CF-HARDENING PATCH: fetch from BOTH www.spankbang.com AND
+    // spankbang.com (apex) then merge. Some Grayjay builds scope cookies to
+    // the exact host the webview navigated to; if the user solved the
+    // captcha on the www subdomain, cookies at the apex would be missed and
+    // vice-versa. Merging guarantees cf_clearance / sb_session are found
+    // regardless of which host Grayjay stored them under.
     try {
-        if (typeof http.getCookies === 'function') {
-            const cookies = http.getCookies(BASE_URL);
-            const cookieStr = cookiesToString(cookies);
-            if (cookieStr && cookieStr.length > 0) {
-                state.authCookies = cookieStr;
-                const hasSession = hasValidAuthCookie(cookies);
+        const mergedCookies = {};
+        const addFromHost = (host) => {
+            try {
+                if (typeof http !== 'undefined' && typeof http.getCookies === 'function') {
+                    const c = http.getCookies(host);
+                    const s = cookiesToString(c);
+                    if (s) {
+                        for (const kv of s.split(';')) {
+                            const eq = kv.indexOf('=');
+                            if (eq > 0) {
+                                const k = kv.slice(0, eq).trim();
+                                const v = kv.slice(eq + 1).trim();
+                                if (k && !(k in mergedCookies)) mergedCookies[k] = v;
+                            }
+                        }
+                    }
+                }
+            } catch (_) { /* ignore */ }
+        };
+        // Order matters: www first (where cf_clearance is most likely bound),
+        // then apex fills in anything missing (session cookies from older code
+        // paths that still hit https://spankbang.com/).
+        addFromHost("https://www.spankbang.com");
+        addFromHost("https://spankbang.com");
+        const mergedStr = Object.keys(mergedCookies).map(k => `${k}=${mergedCookies[k]}`).join("; ");
+        if (mergedStr && mergedStr.length > 0) {
+            state.authCookies = mergedStr;
+            // v101: reset the cached freshness result so the NEXT
+            // isCfClearanceFresh() call recomputes against the new cookie.
+            state.cfClearanceCheckedAt = 0;
+            const hasSession = hasValidAuthCookie(mergedStr);
                 log("Loaded cookies from http.getCookies (hasSession=" + hasSession +
-                    ", hasCfClearance=" + (cookieStr.indexOf("cf_clearance") !== -1) + ")");
+                    ", hasCfClearance=" + (mergedStr.indexOf("cf_clearance") !== -1) + ")");
                 return hasSession;
-            }
+            
         }
         
         if (typeof bridge !== 'undefined') {
@@ -4188,6 +4395,7 @@ function loadAuthCookies() {
                 const cookieStr = bridge.getCookieString(BASE_URL);
                 if (cookieStr && cookieStr.length > 0) {
                     state.authCookies = cookieStr;
+                    state.cfClearanceCheckedAt = 0;
                     const hasSession = hasValidAuthCookie(cookieStr);
                     log("Loaded cookies from bridge.getCookieString (hasSession=" + hasSession + ")");
                     return hasSession;
@@ -4199,6 +4407,7 @@ function loadAuthCookies() {
                 const cookieStr = cookiesToString(authCookies);
                 if (cookieStr && cookieStr.length > 0) {
                     state.authCookies = cookieStr;
+                    state.cfClearanceCheckedAt = 0;
                     const hasSession = hasValidAuthCookie(authCookies);
                     log("Loaded cookies from bridge.getAuthCookies (hasSession=" + hasSession + ")");
                     return hasSession;
@@ -4211,6 +4420,7 @@ function loadAuthCookies() {
                     const cookieStr = cookiesToString(cookies);
                     if (cookieStr && cookieStr.length > 0) {
                         state.authCookies = cookieStr;
+                        state.cfClearanceCheckedAt = 0;
                         const hasSession = hasValidAuthCookie(cookies);
                         log("Loaded cookies from bridge.getCookies (hasSession=" + hasSession + ")");
                         return hasSession;
@@ -4383,11 +4593,50 @@ source.enable = function(conf, settings, savedStateStr) {
         }
     }
 };
+    // v101 CF-HARDENING PATCH: proactive Cloudflare bootstrap.
+    // If we don't already have a fresh cf_clearance cookie, throw ONE
+    // CaptchaRequiredException pointed at /trending_videos/1/ (a high-cache
+    // page that reliably hits CF but never redirects). Grayjay opens the
+    // captcha webview, user solves Turnstile, cookie lands in the jar, plugin
+    // is re-enabled with the fresh clearance -- and we then never bootstrap
+    // again this session (state.bootstrapDone). This eliminates the
+    // "first-request 403 -> webview -> retry -> 403" ping-pong.
+    try {
+        if (!state.bootstrapDone && typeof CaptchaRequiredException !== 'undefined') {
+            try { loadAuthCookies(); } catch (_) { /* ignore */ }
+            const fresh = isCfClearanceFresh(state.authCookies || "");
+            if (fresh !== true) {
+                state.bootstrapDone = true;
+                state.captchaAttempts = (state.captchaAttempts | 0) + 1;
+                log("[SB] bootstrap: no fresh cf_clearance -- throwing CaptchaRequiredException once");
+                throw new CaptchaRequiredException(
+                    BASE_URL + "/trending_videos/1/",
+                    "SpankBang needs a Cloudflare clearance before any request can succeed."
+                );
+            } else {
+                state.bootstrapDone = true;
+                log("[SB] bootstrap: cf_clearance already fresh, skipping pre-emptive captcha");
+            }
+        }
+    } catch (e) {
+        // Re-throw CaptchaRequiredException so Grayjay can open the webview.
+        if (typeof CaptchaRequiredException !== 'undefined' && e instanceof CaptchaRequiredException) {
+            throw e;
+        }
+        log("[SB] bootstrap error (non-fatal): " + e);
+    }
 
 source.disable = function() {
     state.sessionCookie = "";
     state.isAuthenticated = false;
     state.authCookies = "";
+    // v101 CF-HARDENING PATCH: reset per-session captcha bookkeeping so the
+    // next enable() bootstrap re-arms cleanly.
+    state.captchaAttempts = 0;
+    state.captchaSolvedOnce = false;
+    state.cfClearanceCheckedAt = 0;
+    state.cfClearanceFresh = false;
+    state.bootstrapDone = false;
 };
 
 source.saveState = function() {
