@@ -7,7 +7,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangConfig.json",
   "repositoryUrl": "https://github.com/uarasio/SB-GJ",
   "scriptUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/SpankbangScript.js",
-  "version": 94,
+  "version": 95,
   "iconUrl": "https://raw.githubusercontent.com/uarasio/SB-GJ/refs/heads/main/icon.png",
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "packages": [
@@ -15,7 +15,7 @@
     "DOMParser",
     "Utilities"
   ],
-  "allowAllHttpHeaderAccess": false,
+  "allowAllHttpHeaderAccess": true,
   "allowEval": false,
   "allowUrls": [
     "spankbang.com",
@@ -35,10 +35,10 @@
     "cdnjs.cloudflare.com"
   ],
   "authentication": {
-    "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "loginUrl": "https://spankbang.com/users/login",
     "completionUrl": "https://spankbang.com/",
-    "cookiesToFind": ["sb_session", "sessionid", "session_id", "sb_user_id", "sb_uid", "user_id", "logged_in", "remember_token"],
+    "cookiesToFind": ["sb_session"],
     "cookiesExclOthers": false
   },
   "subscriptionRateLimit": 150,

@@ -73,20 +73,25 @@ const CONFIG = {
     }
 };
 
-// NOTE: User-Agent MUST match SpankbangConfig.json -> authentication.userAgent
-// so Cloudflare associates the cf_clearance cookie obtained in the login webview
-// with the same UA the plugin uses at runtime. If they diverge, CF returns 403.
-// We use Android Chrome to match Grayjay's actual WebView platform -- if we
-// claim "Windows Chrome" on an Android WebView, Cloudflare Turnstile detects
-// the fingerprint mismatch (WebGL / canvas / screen) and refuses to issue
-// cf_clearance no matter how many times you tap "Verify you are human".
+// NOTE: This User-Agent MUST stay identical to SpankbangConfig.json ->
+// authentication.userAgent. Cloudflare binds its __cf_bm bot-management token
+// to the exact UA that first solved the check, so if the login webview and the
+// plugin runtime disagree the CDN returns 403.
+//
+// v95: Grayjay.Desktop runs a DESKTOP Chromium (CEF) webview -- NOT Android.
+// Previous versions forced an Android Pixel UA, which made Cloudflare Turnstile
+// see a mobile UA on a desktop-fingerprinted browser (WebGL / canvas / screen
+// all report desktop). That mismatch is what made "Verify you are human" spin
+// forever. A real desktop browser gets into SpankBang with only __cf_bm and no
+// interactive challenge at all, so we now advertise Desktop Chrome to match the
+// webview's true fingerprint.
 const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.135 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
-    "sec-ch-ua-mobile": "?1",
-    "sec-ch-ua-platform": "\"Android\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
@@ -156,6 +161,50 @@ function getAuthHeaders() {
         headers["Cookie"] = state.authCookies;
     }
     return headers;
+}
+
+// Returns EVERY spankbang.com cookie Grayjay currently holds (session cookies
+// like sb_session/auth AND Cloudflare cookies like __cf_bm), not just the
+// "valid session" ones. Used by the media request modifier so the native
+// player sends the same cookie jar a browser would.
+function getAllCookieString() {
+    try {
+        if (typeof http !== 'undefined' && typeof http.getCookies === 'function') {
+            const cookies = http.getCookies(BASE_URL);
+            const s = cookiesToString(cookies);
+            if (s && s.length > 0) return s;
+        }
+    } catch (e) {
+        log("getAllCookieString failed: " + e);
+    }
+    return state.authCookies || "";
+}
+
+// CRITICAL 403 FIX (v95): VideoUrlSource / HLSSource objects previously carried
+// NO request modifier, so Grayjay.Desktop played the raw CDN URL with none of
+// the User-Agent / Referer / Cookie a browser sends -> Cloudflare 403 on every
+// stream. Attaching getRequestModifier() flips HasRequestModifier true, which is
+// exactly what the desktop backend checks before injecting custom headers into
+// the proxied media request (DetailsController.DirectVideoUrlSource /
+// DirectAudioUrlSource). Requires "allowAllHttpHeaderAccess": true in the config
+// so Cookie / User-Agent / Referer are allowed to be set.
+function buildMediaRequestModifier() {
+    return {
+        modifyRequest: function (url, headers) {
+            headers = headers || {};
+            headers["User-Agent"] = API_HEADERS["User-Agent"];
+            headers["Referer"] = "https://spankbang.com/";
+            headers["Accept-Language"] = API_HEADERS["Accept-Language"];
+            headers["sec-ch-ua"] = API_HEADERS["sec-ch-ua"];
+            headers["sec-ch-ua-mobile"] = API_HEADERS["sec-ch-ua-mobile"];
+            headers["sec-ch-ua-platform"] = API_HEADERS["sec-ch-ua-platform"];
+            const cookieStr = getAllCookieString();
+            if (cookieStr && cookieStr.length > 0) {
+                headers["Cookie"] = cookieStr;
+            }
+            return { url: url, headers: headers };
+        }
+    };
 }
 
 function sleep(ms) {
@@ -2004,6 +2053,7 @@ function parseRelatedVideos(html) {
 
 function createVideoSources(videoData) {
     const videoSources = [];
+    const mediaModifier = buildMediaRequestModifier();
 
     const qualityOrder = ['4k', '2160p', '1080p', '720p', '480p', '360p', '320p', '240p'];
 
@@ -2011,13 +2061,15 @@ function createVideoSources(videoData) {
         if (videoData.sources[quality]) {
             const qualityKey = quality.replace('p', '');
             const config = CONFIG.VIDEO_QUALITIES[qualityKey] || CONFIG.VIDEO_QUALITIES[quality] || { width: 854, height: 480 };
-            videoSources.push(new VideoUrlSource({
+            const vs = new VideoUrlSource({
                 url: videoData.sources[quality],
                 name: quality.toUpperCase(),
                 container: "video/mp4",
                 width: config.width,
                 height: config.height
-            }));
+            });
+            vs.getRequestModifier = function () { return mediaModifier; };
+            videoSources.push(vs);
         }
     }
 
@@ -2027,23 +2079,27 @@ function createVideoSources(videoData) {
         if (!alreadyAdded && url && url.startsWith('http')) {
             const qualityKey = quality.replace('p', '');
             const config = CONFIG.VIDEO_QUALITIES[qualityKey] || CONFIG.VIDEO_QUALITIES[quality] || { width: 854, height: 480 };
-            videoSources.push(new VideoUrlSource({
+            const vs = new VideoUrlSource({
                 url: url,
                 name: quality.toUpperCase(),
                 container: "video/mp4",
                 width: config.width,
                 height: config.height
-            }));
+            });
+            vs.getRequestModifier = function () { return mediaModifier; };
+            videoSources.push(vs);
         }
     }
 
     if (videoData.sources.hls || videoData.sources.m3u8) {
         const hlsUrl = videoData.sources.hls || videoData.sources.m3u8;
-        videoSources.push(new HLSSource({
+        const hls = new HLSSource({
             url: hlsUrl,
             name: "HLS (Adaptive)",
             priority: true
-        }));
+        });
+        hls.getRequestModifier = function () { return mediaModifier; };
+        videoSources.push(hls);
     }
 
     if (videoSources.length === 0) {
@@ -3902,11 +3958,12 @@ function fetchCommentsFromApi(videoId) {
 function hasValidAuthCookie(cookies) {
     if (!cookies) return false;
 
-    // Broadened v94: SpankBang stopped setting sb_session after the Cloudflare rollout.
-    // Accept any plausible session cookie name so isLoggedIn() actually returns true
-    // after a successful login regardless of which cookie SB currently issues.
+    // v95: confirmed against a live logged-in SpankBang cookie jar. The two
+    // cookies that only appear AFTER a successful sign-in are `sb_session`
+    // (the HTTPOnly session) and `auth` (remember-me, encodes userid:username).
+    // Everything else in the list is kept as a defensive fallback.
     const validCookieNames = [
-        'sb_session', 'sessionid', 'session_id', 'sb_user_id', 'sb_uid',
+        'sb_session', 'auth', 'sessionid', 'session_id', 'sb_user_id', 'sb_uid',
         'user_id', 'logged_in', 'remember_token', 'session_token'
     ];
 
