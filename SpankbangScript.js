@@ -268,6 +268,7 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
             // sign in so Grayjay opens the webview and refreshes cookies.
             // v96: try one last retry with a plain guest header set (in case
                 // useAuth=true is somehow polluting the request), then give up.
+                if (response.code === 403) {
                 if (useAuth) {
                     log(`${context}: got 403 with useAuth=true, trying one plain guest retry`);
                     try {
