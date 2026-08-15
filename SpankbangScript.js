@@ -78,18 +78,15 @@ const CONFIG = {
 // to the exact UA that first solved the check, so if the login webview and the
 // plugin runtime disagree the CDN returns 403.
 //
-// v95: Grayjay.Desktop runs a DESKTOP Chromium (CEF) webview -- NOT Android.
-// Previous versions forced an Android Pixel UA, which made Cloudflare Turnstile
-// see a mobile UA on a desktop-fingerprinted browser (WebGL / canvas / screen
-// all report desktop). That mismatch is what made "Verify you are human" spin
-// forever. A real desktop browser gets into SpankBang with only __cf_bm and no
-// interactive challenge at all, so we now advertise Desktop Chrome to match the
-// webview's true fingerprint.
+// v96: UA bumped to Chrome 133 (current Feb 2026 stable). Chrome 131 was ~1 year
+// old and Cloudflare Turnstile's fingerprint DB started flagging that combo as
+// "outdated / possibly automated", which produced the "Verify you are human"
+// infinite refresh loop reported by users. Sec-CH-UA strings updated to match.
 const API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
-    "sec-ch-ua": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
+    "sec-ch-ua": "\"Chromium\";v=\"133\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"133\"",
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": "\"Windows\"",
     "sec-fetch-dest": "document",
@@ -99,6 +96,17 @@ const API_HEADERS = {
     "upgrade-insecure-requests": "1",
     "Referer": "https://spankbang.com/"
 };
+
+// Sentinel prefix for Cloudflare 403 errors so top-level source.* handlers can
+// distinguish "browser challenge not yet solved" (recoverable: return empty
+// pager + guidance) from real HTTP failures (still fatal).
+const CF_403_PREFIX = "CLOUDFLARE_403:";
+
+function isCloudflare403Error(err) {
+    if (!err) return false;
+    const msg = (err.message || err.toString() || "");
+    return msg.indexOf(CF_403_PREFIX) !== -1 || msg.indexOf("Cloudflare 403") !== -1;
+}
 
 const REGEX_PATTERNS = {
     urls: {
@@ -258,19 +266,22 @@ function makeRequest(url, headers = null, context = 'request', useAuth = true) {
             // (that webview has already solved the challenge and stored
             // cf_clearance / __cf_bm). If that ALSO fails, tell the user to
             // sign in so Grayjay opens the webview and refreshes cookies.
-            if (response.code === 403) {
-                if (!useAuth) {
-                    log(`${context}: got 403, retrying via authenticated client to pick up cf_clearance cookie`);
-                    const authRetry = http.GET(url, requestHeaders, true);
-                    if (authRetry.isOk) return authRetry.body;
+            // v96: try one last retry with a plain guest header set (in case
+                // useAuth=true is somehow polluting the request), then give up.
+                if (useAuth) {
+                    log(`${context}: got 403 with useAuth=true, trying one plain guest retry`);
+                    try {
+                        const guestRetry = http.GET(url, API_HEADERS, false);
+                        if (guestRetry && guestRetry.isOk) return guestRetry.body;
+                    } catch (_) { /* ignore */ }
                 }
                 throw new ScriptException(
-                    `${context} was blocked by SpankBang (Cloudflare 403). ` +
+                    `${CF_403_PREFIX} ${context} was blocked by SpankBang (Cloudflare 403). ` +
                     `Open the sign-in webview from Grayjay source settings ONCE ` +
-                    `so the Cloudflare challenge can be solved. You can either ` +
-                    `complete the SpankBang login for personalized features, ` +
-                    `OR just wait for the green Turnstile checkmark and close ` +
-                    `the webview via back button to browse as a guest.`
+                    `so the Cloudflare challenge can be solved. When you see the ` +
+                    `green "Success!" Turnstile checkmark, press the BACK button ` +
+                    `to close the webview and browse as a guest (no login required). ` +
+                    `Or complete the SpankBang login for personalized features.`
                 );
             }
             throw new ScriptException(`${context} failed with status ${response.code}`);
@@ -4033,42 +4044,60 @@ function cookiesToString(cookies) {
 }
 
 function loadAuthCookies() {
+    // v96: previously this ONLY populated state.authCookies if a session
+    // cookie (sb_session / auth / etc.) was present. That meant guest-mode
+    // users who just wanted to solve Cloudflare Turnstile and browse without
+    // logging in were losing their cf_clearance / __cf_bm cookies here --
+    // getAuthHeaders() then sent an empty Cookie header, Cloudflare rejected
+    // the request as unchallenged, and every feed returned 403.
+    //
+    // Fix: capture ALL cookies for spankbang.com whenever any are present;
+    // only the RETURN value (true / false) still reflects "is there a valid
+    // *session* cookie" (used by isLoggedIn()).
     try {
         if (typeof http.getCookies === 'function') {
             const cookies = http.getCookies(BASE_URL);
-            if (hasValidAuthCookie(cookies)) {
-                state.authCookies = cookiesToString(cookies);
-                log("Loaded auth cookies from http.getCookies");
-                return true;
+            const cookieStr = cookiesToString(cookies);
+            if (cookieStr && cookieStr.length > 0) {
+                state.authCookies = cookieStr;
+                const hasSession = hasValidAuthCookie(cookies);
+                log("Loaded cookies from http.getCookies (hasSession=" + hasSession +
+                    ", hasCfClearance=" + (cookieStr.indexOf("cf_clearance") !== -1) + ")");
+                return hasSession;
             }
         }
         
         if (typeof bridge !== 'undefined') {
             if (typeof bridge.getCookieString === 'function') {
                 const cookieStr = bridge.getCookieString(BASE_URL);
-                if (hasValidAuthCookie(cookieStr)) {
+                if (cookieStr && cookieStr.length > 0) {
                     state.authCookies = cookieStr;
-                    log("Loaded auth cookies from bridge.getCookieString");
-                    return true;
+                    const hasSession = hasValidAuthCookie(cookieStr);
+                    log("Loaded cookies from bridge.getCookieString (hasSession=" + hasSession + ")");
+                    return hasSession;
                 }
             }
             
             if (typeof bridge.getAuthCookies === 'function') {
                 const authCookies = bridge.getAuthCookies();
-                if (hasValidAuthCookie(authCookies)) {
-                    state.authCookies = cookiesToString(authCookies);
-                    log("Loaded auth cookies from bridge.getAuthCookies");
-                    return true;
+                const cookieStr = cookiesToString(authCookies);
+                if (cookieStr && cookieStr.length > 0) {
+                    state.authCookies = cookieStr;
+                    const hasSession = hasValidAuthCookie(authCookies);
+                    log("Loaded cookies from bridge.getAuthCookies (hasSession=" + hasSession + ")");
+                    return hasSession;
                 }
             }
             
             if (typeof bridge.getCookies === 'function') {
                 try {
                     const cookies = bridge.getCookies("spankbang.com");
-                    if (hasValidAuthCookie(cookies)) {
-                        state.authCookies = cookiesToString(cookies);
-                        log("Loaded auth cookies from bridge.getCookies");
-                        return true;
+                    const cookieStr = cookiesToString(cookies);
+                    if (cookieStr && cookieStr.length > 0) {
+                        state.authCookies = cookieStr;
+                        const hasSession = hasValidAuthCookie(cookies);
+                        log("Loaded cookies from bridge.getCookies (hasSession=" + hasSession + ")");
+                        return hasSession;
                     }
                 } catch (e) {
                     log("bridge.getCookies failed: " + e);
@@ -4076,7 +4105,9 @@ function loadAuthCookies() {
             }
         }
         
-        log("No valid auth cookies found (looking for sb_session, sessionid, session_id, sb_user_id, sb_uid, user_id, logged_in, remember_token, session_token)");
+        log("No cookies found for spankbang.com yet (Cloudflare challenge not solved). " +
+            "Open sign-in webview from source settings, wait for green Turnstile checkmark, " +
+            "then press BACK button.");
     } catch (e) {
         log("Failed to load auth cookies: " + e);
     }
@@ -5679,6 +5710,12 @@ source.getLikedVideos = function() {
 
 source.getHome = function(continuationToken) {
     try {
+        // v96: proactively refresh cookie jar from Grayjay's store on every
+        // home fetch so that if the user JUST opened & closed the sign-in
+        // webview to solve Turnstile, we pick up cf_clearance / __cf_bm on
+        // the very next feed refresh (no plugin reload needed).
+        try { loadAuthCookies(); } catch (_) { /* ignore */ }
+
         const page = continuationToken ? parseInt(continuationToken) : 1;
         const url = `${BASE_URL}/trending_videos/${page}/`;
 
@@ -5692,6 +5729,15 @@ source.getHome = function(continuationToken) {
         return new SpankBangHomeContentPager(platformVideos, hasMore, { continuationToken: nextToken });
 
     } catch (error) {
+        // v96: don't hard-error the entire home screen when Cloudflare hasn't
+        // been passed yet -- returning an empty pager lets Grayjay render a
+        // clean "no items" state and the user can still open source settings
+        // to solve the challenge. Re-throw non-CF errors so real bugs surface.
+        if (isCloudflare403Error(error)) {
+            log("[getHome] Cloudflare 403 -- returning empty pager. " +
+                "Open sign-in webview from source settings, wait for green Turnstile, press BACK.");
+            return new SpankBangHomeContentPager([], false, { continuationToken: null });
+        }
         throw new ScriptException("Failed to get home content: " + error.message);
     }
 };
@@ -5932,6 +5978,7 @@ source.search = function(query, type, order, filters, continuationToken) {
 
         log("Search URL: " + searchUrl);
 
+        try { loadAuthCookies(); } catch (_) { /* ignore */ }
         const html = makeRequest(searchUrl, API_HEADERS, 'search');
         const videos = parseSearchResults(html);
         const platformVideos = videos.map(v => createPlatformVideo(v));
@@ -5948,6 +5995,12 @@ source.search = function(query, type, order, filters, continuationToken) {
         });
 
     } catch (error) {
+        if (isCloudflare403Error(error)) {
+            log("[search] Cloudflare 403 -- returning empty pager. Solve Turnstile via sign-in webview.");
+            return new SpankBangSearchPager([], false, {
+                query: query, type: type, order: order, filters: filters, continuationToken: null
+            });
+        }
         throw new ScriptException("Failed to search: " + error.message);
     }
 };
@@ -6455,7 +6508,7 @@ source.getContentDetails = function(url) {
             // Or convert to standard video URL format
             log("Detected video-in-playlist URL, video ID: " + videoId);
         }
-        
+        try { loadAuthCookies(); } catch (_) { /* ignore */ }
         const html = makeRequest(url, API_HEADERS, 'video details');
         log("getContentDetails: Received HTML length: " + html.length);
         
@@ -6471,6 +6524,13 @@ source.getContentDetails = function(url) {
 
     } catch (error) {
         log("getContentDetails ERROR: " + error.message);
+        if (isCloudflare403Error(error)) {
+            throw new ScriptException(
+                "Cloudflare is blocking video access. Open the sign-in webview " +
+                "from Grayjay source settings, wait for the green Turnstile checkmark, " +
+                "then press the BACK button to close the webview. Then try again."
+            );
+        }
         throw new ScriptException("Failed to get video details: " + error.message);
     }
 };

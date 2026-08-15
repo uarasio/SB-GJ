@@ -20,6 +20,7 @@
   "allowUrls": [
     "spankbang.com",
     ".spankbang.com",
+    "www.spankbang.com",
     ".spankcdn.com",
     ".sb-cd.com",
     ".sb-cdn.com",
@@ -30,15 +31,20 @@
     ".cdn4.spankbang.com",
     "tbi.sb-cd.com",
     "challenges.cloudflare.com",
+    ".challenges.cloudflare.com",
     ".cloudflare.com",
     "static.cloudflareinsights.com",
-    "cdnjs.cloudflare.com"
+    "cdnjs.cloudflare.com",
+    ".cloudflareinsights.com",
+    "www.google.com",
+    "www.gstatic.com",
+    "www.recaptcha.net"
   ],
   "authentication": {
-    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
     "loginUrl": "https://spankbang.com/users/login",
     "completionUrl": "https://spankbang.com/",
-    "cookiesToFind": ["sb_session"],
+    "cookiesToFind": ["sb_session", "auth", "sessionid", "session_id", "sb_user_id", "sb_uid", "user_id", "logged_in", "remember_token", "session_token"],
     "cookiesExclOthers": false
   },
   "subscriptionRateLimit": 150,
